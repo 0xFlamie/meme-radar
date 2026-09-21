@@ -1,0 +1,34 @@
+[Unit]
+Description=Meme Radar read-only scanner
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=meme-radar
+Group=meme-radar
+WorkingDirectory=/opt/meme-radar
+ExecStart=/opt/node-v24.21.0-linux-x64/bin/node --use-env-proxy src/main.mjs
+Environment=NODE_ENV=production
+Environment=NODE_OPTIONS=--max-old-space-size=192
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+UMask=0077
+CPUQuota=50%
+MemoryHigh=320M
+MemoryMax=384M
+MemorySwapMax=128M
+TasksMax=64
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/meme-radar/state /opt/meme-radar/logs
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

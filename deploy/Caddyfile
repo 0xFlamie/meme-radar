@@ -1,0 +1,23 @@
+{$RADAR_SITE:meme.polymeow.com} {
+	route {
+		header >Cache-Control "no-store"
+		@foreignOrigin {
+			header Origin *
+			not header Origin https://meme.polymeow.com
+		}
+		respond @foreignOrigin "Forbidden" 403
+		@unsafeWrite {
+			not method GET HEAD
+			not header Origin https://meme.polymeow.com
+		}
+		respond @unsafeWrite "Forbidden" 403
+		import {$RADAR_AUTH_FILE:/etc/caddy/meme-radar-auth.caddy}
+		# 先校验外部来源，再转换为上游要求的回环来源；缺少 Origin 时保留缺失状态。
+		@sameOrigin header Origin https://meme.polymeow.com
+		request_header @sameOrigin Origin http://{$RADAR_UPSTREAM:127.0.0.1:3791}
+		reverse_proxy {$RADAR_UPSTREAM:127.0.0.1:3791} {
+			header_up Host {upstream_hostport}
+			header_up -Authorization
+		}
+	}
+}
