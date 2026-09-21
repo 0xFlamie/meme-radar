@@ -7,5 +7,8 @@
 
 ## 当前状态
 
-- 2026-09-21：用户授权部署 txvps 与 meme.polymeow.com，并指定登录凭证；原始 135 项测试通过。
-- 新增独立 systemd、Caddy 及反代验收，待本机检查和服务器上线；不包含 Telegram。
+- 2026-09-21 21:09+08：已按用户授权部署 txvps，应用提交 `a1a502499efa583b0609f899753bf94bfe9cf9e4`，远端 `0xFlamie/meme-radar`。
+- `https://meme.polymeow.com` 经 Cloudflare、Caddy 独立 Basic Auth 转发 `127.0.0.1:3791`；用户名 meme，密码不入库。专用 systemd 已 enabled/active，半核 CPU/384MiB 内存限制。
+- 本机及服务器 135 项测试、发布审计、真实 Caddy 反代测试均通过；公开 HTTPS 正确登录200、无登录/错误密码401、恶意/缺失Origin写入403。DN 与 rhlit HTTP200，零重启；未配置API时服务内存约19MB，不能代表扫描峰值。
+- 当前 `GMGN_AUTH_REQUIRED`，待用户在网页创建 Agent 公钥并绑定只读 GMGN API；密钥将保存在服务器 state/，不包含 Telegram。
+- Caddy 初始回滚备份 `/etc/caddy/Caddyfile.before-meme-20260921`。回滚只撤销本项目 import 并停止 meme-radar；若其他站点后续更新，不得整份覆盖旧 Caddy 配置。
