@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { Readable } from 'node:stream';
+import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { createServer, healthSnapshot, isTrustedLocalRequest, toPublicStatus } from '../src/server.mjs';
 
@@ -173,7 +174,7 @@ function dispatch(server, { method = 'GET', pathName = '/', headers = {}, body =
     req.headers = Object.fromEntries(Object.entries({ host: '127.0.0.1:3791', ...headers }).map(([key, value]) => [key.toLowerCase(), value]));
     req.socket = { remoteAddress: '127.0.0.1' };
     const response = { status: 0, headers: {}, body: '' };
-    const res = {
+    const res = Object.assign(new EventEmitter(), {
       writeHead(status, responseHeaders) {
         response.status = status;
         response.headers = Object.fromEntries(Object.entries(responseHeaders).map(([key, value]) => [key.toLowerCase(), value]));
@@ -182,7 +183,7 @@ function dispatch(server, { method = 'GET', pathName = '/', headers = {}, body =
         response.body = String(responseBody);
         resolve(response);
       }
-    };
+    });
     Promise.resolve(server.listeners('request')[0](req, res)).catch(reject);
   });
 }

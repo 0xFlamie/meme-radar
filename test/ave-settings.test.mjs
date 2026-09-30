@@ -133,3 +133,117 @@ test('old split format, extra fields, header injection, revoked authority and co
     assert.equal(readFileSync(file, 'utf8'), '{broken');
   } finally { f.close(); }
 });
+
+const VERIFY_AT = Date.UTC(2026, 8, 30, 12);
+const ORIGINAL_KEY = 'original-synthetic-verification-key';
+const CANDIDATE_KEY = 'candidate-synthetic-verification-secret';
+function sharedVerificationFixture(verifyData, options = {}) {
+  const directory = mkdtempSync(join(tmpdir(), 'radar-ave-verify-'));
+  const file = join(directory, 'ave-credentials.json');
+  writeFileSync(file, JSON.stringify({ schema: 2, key: ORIGINAL_KEY }));
+  const saved = readFileSync(file, 'utf8'), changes = [];
+  const settings = createAveSettings({ directory, now: () => VERIFY_AT, verifyData,
+    onChange: value => changes.push(value), ...options });
+  return { settings, changes, assertRetained() {
+    assert.equal(settings.getKey(), ORIGINAL_KEY);
+    assert.equal(readFileSync(file, 'utf8'), saved);
+    assert.equal(changes.length, 0);
+  }, close() { rmSync(directory, { recursive: true, force: true }); } };
+}
+
+test('shared-client verification preserves typed wait, budget and service errors without exposing upstream text', async () => {
+  const mappings = [
+    ['AVE_HOURLY_BUDGET', 429], ['AVE_TOTAL_BUDGET', 429], ['AVE_DISCOVERY_RESERVE', 429], ['AVE_WAIT', 429],
+    ['AVE_NETWORK', 502], ['AVE_UPSTREAM', 502], ['AVE_AUTH', 400], ['AVE_BUDGET', 429], ['AVE_QUOTA', 429],
+    ['AVE_RATE_LIMITED', 429, 'AVE_RATE_LIMIT'], ['AVE_BUDGET_STORE', 503, 'AVE_STORAGE']
+  ];
+  for (const [code, status, mapped = code] of mappings) {
+    const retryAt = VERIFY_AT + 7200000;
+    const f = sharedVerificationFixture(async () => { throw Object.assign(new Error('upstream ' + CANDIDATE_KEY), { code, retryAt }); });
+    try {
+      await assert.rejects(f.settings.configure({ key: CANDIDATE_KEY }), error => {
+        assert.equal(error.code, mapped); assert.equal(error.status, status); assert.equal(error.retryAt, retryAt);
+        assert.doesNotMatch(error.message + JSON.stringify(error), /synthetic|upstream/);
+        return true;
+      });
+      f.assertRetained();
+      assert.equal(f.settings.snapshot().data.status, 'untested', 'a failed replacement must not invalidate the old key');
+      assert.doesNotMatch(JSON.stringify(f.settings.snapshot()), /synthetic/);
+      if (['AVE_HOURLY_BUDGET', 'AVE_DISCOVERY_RESERVE', 'AVE_WAIT', 'AVE_BUDGET', 'AVE_QUOTA', 'AVE_RATE_LIMITED'].includes(code)) {
+        await assert.rejects(f.settings.configure({ key: CANDIDATE_KEY }), error => error.code === 'AVE_COOLDOWN' && error.retryAt === retryAt);
+      }
+    } finally { f.close(); }
+  }
+});
+
+test('verification retry timestamps reject invalid, stale and implausibly distant values', async () => {
+  for (const retryAt of [undefined, -1, 0, NaN, Infinity, VERIFY_AT, VERIFY_AT - 1,
+    VERIFY_AT + 0.5, String(VERIFY_AT + 300000), VERIFY_AT + 367 * 86400000]) {
+    const f = sharedVerificationFixture(async () => { throw Object.assign(new Error(CANDIDATE_KEY), { code: 'AVE_WAIT', retryAt }); });
+    try {
+      await assert.rejects(f.settings.configure({ key: CANDIDATE_KEY }), error => error.code === 'AVE_WAIT' && !Object.hasOwn(error, 'retryAt'));
+      f.assertRetained();
+    } finally { f.close(); }
+  }
+});
+
+test('unknown shared-client failures expose only a safe diagnostic code and preserve the saved key', async () => {
+  const f = sharedVerificationFixture(async () => { throw Object.assign(new Error('https://provider.invalid/?key=' + CANDIDATE_KEY),
+    { code: 'CUSTOM_' + CANDIDATE_KEY, status: 401 }); });
+  try {
+    await assert.rejects(f.settings.configure({ key: CANDIDATE_KEY }), error => {
+      assert.equal(error.code, 'AVE_CONNECT'); assert.equal(error.status, 502);
+      assert.doesNotMatch(error.message + JSON.stringify(error), /synthetic|provider|CUSTOM_/);
+      return true;
+    });
+    f.assertRetained();
+  } finally { f.close(); }
+});
+
+test('caller cancellation prevents a late successful verifier from replacing the saved key', async () => {
+  let release, started, receivedSignal;
+  const ready = new Promise(resolve => { started = resolve; });
+  const controller = new AbortController();
+  const f = sharedVerificationFixture((_key, { signal }) => {
+    receivedSignal = signal; started(); return new Promise(resolve => { release = resolve; });
+  });
+  try {
+    const request = f.settings.configure({ key: CANDIDATE_KEY }, () => {}, { signal: controller.signal });
+    await ready; controller.abort();
+    await assert.rejects(request, { code: 'AVE_ABORTED' });
+    assert.equal(receivedSignal.aborted, true); f.assertRetained();
+    release({ connected: true }); await new Promise(resolve => setImmediate(resolve));
+    f.assertRetained();
+  } finally { f.close(); }
+});
+
+test('bounded verification deadline retains the old key even if the verifier ignores abort and succeeds later', async () => {
+  let release, receivedSignal;
+  const keepAlive = setInterval(() => {}, 1000);
+  const f = sharedVerificationFixture((_key, { signal }) => {
+    receivedSignal = signal; return new Promise(resolve => { release = resolve; });
+  }, { verificationTimeoutMs: 15 });
+  try {
+    await assert.rejects(f.settings.configure({ key: CANDIDATE_KEY }), { code: 'AVE_TIMEOUT', status: 504 });
+    assert.equal(receivedSignal.aborted, true); f.assertRetained();
+    release({ connected: true }); await new Promise(resolve => setImmediate(resolve));
+    f.assertRetained();
+  } finally { clearInterval(keepAlive); f.close(); }
+});
+
+test('deferred saved-key retests retain credentials and show waiting with the actual budget or cooldown reason', async () => {
+  for (const code of ['AVE_WAIT', 'AVE_BUSY', 'AVE_RATE_LIMITED', 'AVE_QUOTA', 'AVE_BUDGET',
+    'AVE_HOURLY_BUDGET', 'AVE_TOTAL_BUDGET', 'AVE_DISCOVERY_RESERVE']) {
+    const f = sharedVerificationFixture(async () => { throw Object.assign(new Error(CANDIDATE_KEY),
+      { code, retryAt: VERIFY_AT + 3600000 }); });
+    const mapped = code === 'AVE_RATE_LIMITED' ? 'AVE_RATE_LIMIT' : code;
+    try {
+      await assert.rejects(f.settings.configure({ key: '' }), { code: mapped });
+      assert.equal(f.settings.snapshot().data.status, 'waiting');
+      assert.equal(f.settings.snapshot().data.code, mapped);
+      assert.equal(f.settings.snapshot().data.retryAt, VERIFY_AT + 3600000);
+      assert.doesNotMatch(JSON.stringify(f.settings.snapshot()), /synthetic/);
+      f.assertRetained();
+    } finally { f.close(); }
+  }
+});

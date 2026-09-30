@@ -917,6 +917,19 @@
       aveChecked: ['只读测试通过','唯讀測試通過','Read-only check passed','読み取りテスト完了','읽기 전용 테스트 통과','نجح اختبار القراءة فقط'],
       aveChecking: ['测试中…','測試中…','Testing…','テスト中…','테스트 중…','جارٍ الاختبار…'],
       aveFailed: ['连接未通过','連線未通過','Connection check failed','接続テスト失敗','연결 테스트 실패','فشل اختبار الاتصال'],
+      aveDeferred: ['测试暂缓','測試暫緩','Test deferred','テスト待機中','테스트 대기','الاختبار مؤجل'],
+      aveTestWaiting: ['暂未测试：扫描排队或请求冷却中，请稍后再试','暫未測試：掃描排隊或請求冷卻中，請稍後再試','Not tested yet: scan queue or cooldown; retry later','未テスト：巡回待機または制限待機中。後で再試行','아직 미검증: 스캔 대기 또는 요청 간격 대기 중','لم يُختبر بعد: انتظار المسح أو فترة التهدئة؛ أعد المحاولة لاحقًا'],
+      aveTestReserved: ['暂未测试：当前优先保留扫描额度，请稍后再试','暫未測試：目前優先保留掃描額度，請稍後再試','Not tested: capacity reserved for scanning; retry later','未テスト：巡回用の枠を優先確保中','아직 미검증: 스캔을 위해 할당량 예약 중','لم يُختبر: السعة محجوزة للمسح؛ أعد المحاولة لاحقًا'],
+      aveTestRetryAt: ['可在 {time} 后手动重试','可在 {time} 後手動重試','Retry manually after {time}','{time}以降に手動で再試行','{time} 이후 수동으로 재시도','أعد المحاولة يدويًا بعد {time}'],
+      aveTestAuth: ['Key 或接口权限未通过，请核对 AVE 控制台','Key 或介面權限未通過，請核對 AVE 控制台','Key or API permission rejected; check the AVE console','キーまたは権限が拒否されました。AVEで確認','Key 또는 API 권한 거부; AVE 콘솔을 확인하세요','تم رفض المفتاح أو صلاحية API؛ تحقق من لوحة AVE'],
+      aveTestNetwork: ['无法访问 AVE，请检查网络或系统代理','無法存取 AVE，請檢查網路或系統代理','Cannot reach AVE; check network or system proxy','AVEに到達できません。ネットワークまたはプロキシを確認','AVE에 연결할 수 없음; 네트워크 또는 시스템 프록시 확인','تعذر الوصول إلى AVE؛ تحقق من الشبكة أو وكيل النظام'],
+      aveTestTimeout: ['连接测试超时，请稍后重试；不代表 Key 无效','連線測試逾時，請稍後重試；不代表 Key 無效','Connection test timed out; this does not mean the Key is invalid','接続テストがタイムアウト。キー無効とは限りません','연결 테스트 시간 초과; Key가 잘못되었다는 뜻은 아닙니다','انتهت مهلة اختبار الاتصال؛ هذا لا يعني أن المفتاح غير صالح'],
+      aveTestUpstream: ['AVE 服务暂不可用，请稍后重试','AVE 服務暫不可用，請稍後重試','AVE service unavailable; retry later','AVEが一時利用不可。後で再試行','AVE 서비스 일시 불가; 나중에 재시도','خدمة AVE غير متاحة مؤقتًا؛ حاول لاحقًا'],
+      aveTestResponse: ['AVE 返回数据未通过校验，请查看连接诊断','AVE 回傳資料未通過校驗，請查看連線診斷','AVE response validation failed; check diagnostics','AVE応答の検証失敗。接続診断を確認','AVE 응답 검증 실패; 연결 진단 확인','فشل التحقق من استجابة AVE؛ راجع التشخيص'],
+      aveTestStorage: ['本机保存失败，原配置保留；请检查目录权限','本機儲存失敗，原設定保留；請檢查目錄權限','Local save failed; previous configuration retained. Check folder permissions','保存失敗。元の設定は保持。フォルダ権限を確認','로컬 저장 실패; 기존 설정 유지. 폴더 권한 확인','فشل الحفظ المحلي؛ تم الاحتفاظ بالإعداد السابق. تحقق من أذونات المجلد'],
+      aveTestInput: ['请填写有效的 AVE API Key，不要填写钱包私钥','請填寫有效的 AVE API Key，不要填寫錢包私鑰','Enter an AVE API Key, not a wallet private key','ウォレット秘密鍵ではなくAVE APIキーを入力','지갑 개인 키가 아닌 AVE API Key를 입력하세요','أدخل مفتاح AVE API وليس مفتاح المحفظة الخاص'],
+      aveTestCancelled: ['测试已取消或配置已变更，未保存本次 Key','測試已取消或設定已變更，未儲存本次 Key','Test cancelled or configuration changed; this Key was not saved','テスト取消または設定変更。このキーは未保存','테스트 취소 또는 설정 변경; 이번 Key는 저장되지 않음','أُلغي الاختبار أو تغير الإعداد؛ لم يُحفظ هذا المفتاح'],
+      aveTestUnknown: ['测试未完成，请查看连接诊断；不要发送 API Key','測試未完成，請查看連線診斷；不要傳送 API Key','Test incomplete; check diagnostics. Do not share your API Key','テスト未完了。診断を確認。APIキーは共有しないでください','테스트 미완료; 진단 확인. API Key를 공유하지 마세요','لم يكتمل الاختبار؛ راجع التشخيص ولا تشارك مفتاح API'],
       liveTitle: ['候选雷达','候選雷達','Candidate radar','候補レーダー','후보 레이더','رادار المرشحين'],
       advancedTitle: ['设置与运行记录','設定與執行記錄','Settings & activity','設定と履歴','설정 및 활동','الإعدادات والنشاط'],
       autoScreenPassed: ['自动筛选通过','自動篩選通過','Auto-screen passed','自動選別通過','자동 선별 통과','اجتاز الفرز الآلي'],
@@ -1346,6 +1359,10 @@
           renderChainSwitcher(null);
           renderTelemetry();
           byId('notice').textContent = t('loadingStatus');
+        }
+        if (!aveBusy && aveFeedback) {
+          delete byId('ave-config-status').dataset.i18n;
+          byId('ave-config-status').textContent = aveFeedbackText(aveFeedback);
         }
       }
     }
@@ -2541,47 +2558,79 @@
       }).join('\n');
     }
     let refreshSequence = 0, acceptedRefresh = 0;
-    let aveBusy = false;
+    let aveBusy = false, aveOperation = 0, aveFeedback = null;
+    const aveFeedbackKeys = { AVE_WAIT: 'aveTestWaiting', AVE_BUSY: 'aveTestWaiting', AVE_COOLDOWN: 'aveTestWaiting',
+        AVE_DISCOVERY_RESERVE: 'aveTestReserved', AVE_RATE_LIMIT: 'aveApiRate', AVE_RATE_LIMITED: 'aveApiRate',
+        AVE_HOURLY_BUDGET: 'aveHourlyPaused', AVE_TOTAL_BUDGET: 'aveTotalPaused', AVE_BUDGET: 'aveBudgetPaused', AVE_QUOTA: 'aveQuotaPaused',
+        AVE_AUTH: 'aveTestAuth', AVE_KEY: 'aveTestInput', AVE_INPUT: 'aveTestInput',
+        AVE_NETWORK: 'aveTestNetwork', AVE_TIMEOUT: 'aveTestTimeout', AVE_UPSTREAM: 'aveTestUpstream',
+        AVE_SCHEMA: 'aveTestResponse', AVE_SIZE: 'aveTestResponse', AVE_STORAGE: 'aveTestStorage', AVE_BUDGET_STORE: 'aveTestStorage',
+        AVE_ABORTED: 'aveTestCancelled', AVE_CHANGED: 'aveTestCancelled', AVE_DISABLED: 'aveTestCancelled',
+        AVE_CONNECT: 'aveTestUnknown', AVE_REQUEST: 'aveTestUnknown', AVE_RELOAD: 'aveTestUnknown' };
+    function safeAveFeedback(code, retryAt) {
+      return { code: Object.hasOwn(aveFeedbackKeys, code) ? code : 'AVE_CONNECT',
+        retryAt: Number.isSafeInteger(retryAt) && retryAt > Date.now() && retryAt <= Date.now() + 366 * 86400000 ? retryAt : 0 };
+    }
+    function aveFeedbackText(input) {
+      const feedback = safeAveFeedback(input.code, input.retryAt);
+      return t(aveFeedbackKeys[feedback.code]) + ' · ' + feedback.code
+        + (feedback.retryAt > Date.now() ? ' · ' + t('aveTestRetryAt', { time: formatClock(feedback.retryAt) }) : '');
+    }
     function renderAveConnection(snapshot) {
       const configKey = snapshot?.requiresReentry ? 'aveReentry' : snapshot?.configured ? 'aveKeySaved' : 'aveUnconfigured';
-      byId('ave-config-status').dataset.i18n = configKey;
-      byId('ave-config-status').textContent = t(configKey);
+      const label = byId('ave-config-status');
+      if (aveBusy) { label.dataset.i18n = 'aveChecking'; label.textContent = t('aveChecking'); }
+      else if (aveFeedback) { delete label.dataset.i18n; label.textContent = aveFeedbackText(aveFeedback); }
+      else { label.dataset.i18n = configKey; label.textContent = t(configKey); }
       byId('aveSummary').textContent = ' · ' + t(configKey);
       if (!snapshot?.configured) byId('aveSettings').open = true;
       for (const kind of ['data']) {
-        const key = snapshot?.[kind]?.status === 'connected' ? 'aveChecked' : snapshot?.[kind]?.status === 'error' ? 'aveFailed' : snapshot?.[kind]?.configured ? 'aveSaved' : 'aveUnconfigured';
+        const key = snapshot?.[kind]?.status === 'connected' ? 'aveChecked' : snapshot?.[kind]?.status === 'waiting' ? 'aveDeferred'
+          : snapshot?.[kind]?.status === 'error' ? 'aveFailed' : snapshot?.[kind]?.configured ? 'aveSaved' : 'aveUnconfigured';
         byId('ave-' + kind + '-status').dataset.i18n = key;
         byId('ave-' + kind + '-status').textContent = t(key);
       }
     }
     async function refreshAve() {
+      if (aveBusy) return;
+      const operation = aveOperation;
       try {
         const response = await fetch('/api/ave-status', { cache: 'no-store', signal: AbortSignal.timeout(5000) });
-        if (response.ok) renderAveConnection((await response.json()).ave);
+        if (response.ok) {
+          const result = await response.json();
+          if (!aveBusy && operation === aveOperation) renderAveConnection(result.ave);
+        }
       } catch { /* Preserve the last status; never imply a connection succeeded. */ }
     }
     async function changeAve(action) {
       if (aveBusy) return;
-      aveBusy = true;
+      aveBusy = true; aveOperation++; aveFeedback = null;
       document.querySelectorAll('.ave-settings button').forEach(button => { button.disabled = true; });
       const label = byId('ave-config-status');
       label.dataset.i18n = 'aveChecking'; label.textContent = t('aveChecking');
+      let snapshot;
       try {
         const body = {};
         if (action === 'configure') body.key = byId('ave-api-key').value;
         const response = await fetch('/api/ave-' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(30000) });
         const result = await response.json();
-        if (result.ave) renderAveConnection(result.ave);
-        if (!response.ok) throw new Error(/^[A-Z_]{1,40}$/.test(result.error) ? result.error : 'AVE_REQUEST');
+        snapshot = result.ave;
+        if (snapshot) renderAveConnection(snapshot);
+        if (!response.ok) {
+          const failure = safeAveFeedback(result.error, result.retryAt);
+          throw Object.assign(new Error(failure.code), { retryAt: failure.retryAt });
+        }
         byId('ave-api-key').value = '';
         renderAveConnection(result.ave);
         void refresh();
       } catch (error) {
-        delete label.dataset.i18n;
-        label.textContent = t('aveFailed') + ' · ' + (/^AVE_[A-Z_]{1,30}$/.test(error.message) ? error.message : 'AVE_CONNECT');
+        aveFeedback = safeAveFeedback(error.name === 'TimeoutError' ? 'AVE_TIMEOUT' : error.name === 'AbortError' ? 'AVE_ABORTED'
+          : error.message, error.retryAt);
       } finally {
         byId('ave-api-key').value = '';
         aveBusy = false;
+        if (snapshot) renderAveConnection(snapshot);
+        else if (aveFeedback) { delete label.dataset.i18n; label.textContent = aveFeedbackText(aveFeedback); }
         document.querySelectorAll('.ave-settings button').forEach(button => { button.disabled = false; });
       }
     }

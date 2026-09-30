@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { AveClient } from '../src/ave.mjs';
 const AT = Date.UTC(2026, 8, 22, 12, 10), CA = '0x' + '1'.repeat(40), POOL = '0x' + '2'.repeat(40), KEY = 'fixture-secret-must-not-leak';
 const tick = () => new Promise(resolve => setImmediate(resolve));
+const verificationResponse = () => Response.json({ status: 1, data: { token: { chain: 'bsc', current_price_usd: '1' }, pairs: [] } });
 function fixture(handler, options = {}) {
   let at = AT, stored = null, count = 0;
   const starts = [], now = () => at;
@@ -27,6 +28,110 @@ test('all request kinds wait sixty seconds after complete response, not merely a
   assert.deepEqual(f.starts.map(at => at - AT), [0, 60500, 121000]);
   assert.equal(f.read().totalUsed, 15);
   assert.equal(f.client.snapshot().transport.spacingMs, 60000);
+});
+
+test('verification never waits for pacing, does not spend CU while deferred, and succeeds once allowed', async () => {
+  let pauses = 0;
+  const f = fixture(() => verificationResponse(), { pause: async () => { pauses++; assert.fail('verification must not sleep in the scan queue'); } });
+  assert.equal((await f.client.verifyApiKey(KEY)).connected, true);
+  const before = f.read();
+  await assert.rejects(f.client.verifyApiKey(KEY), error => error.code === 'AVE_WAIT' && error.retryAt === AT + 60000);
+  assert.equal(f.starts.length, 1); assert.equal(f.read().totalUsed, before.totalUsed);
+  assert.equal(f.client.snapshot().metrics.estimatedCu, 5); assert.equal(f.client.snapshot().pending, 0);
+  assert.equal(pauses, 0);
+  f.advance(60000);
+  assert.equal((await f.client.verifyApiKey(KEY)).connected, true);
+  assert.equal(f.starts.length, 2); assert.equal(f.read().totalUsed, 10);
+});
+
+test('verification cannot join another client pending scan or dispatch later after its deferred response', async () => {
+  let release;
+  const f = fixture(({ url, response }) => new Promise(resolve => { release = () => resolve(response(url)); }));
+  const other = new AveClient(f.config);
+  const scan = f.client.trending('bsc');
+  // Before the first queued microtask has even reserved its CU, the global
+  // queue admission is already occupied. Verification must not join it.
+  await assert.rejects(other.verifyApiKey(KEY), { code: 'AVE_WAIT' });
+  await tick();
+  await assert.rejects(other.verifyApiKey(KEY), { code: 'AVE_WAIT' });
+  assert.equal(f.starts.length, 1); assert.equal(f.read().totalUsed, 5);
+  release(); await scan; f.advance(600000); await tick();
+  assert.equal(f.starts.length, 1); assert.equal(f.read().totalUsed, 5);
+  assert.equal(other.snapshot().pending, 0); assert.equal(other.snapshot().metrics.estimatedCu, 0);
+});
+
+test('verification rechecks persisted pacing after asynchronous queue admission without charging or fetching', async () => {
+  let releaseRead, beginRead;
+  const reading = new Promise(resolve => { beginRead = resolve; });
+  const f = fixture(undefined, { readBudget: () => { beginRead(); return new Promise(resolve => { releaseRead = resolve; }); },
+    pause: async () => assert.fail('verification must not sleep') });
+  const request = f.client.verifyApiKey(KEY);
+  await reading;
+  // Another process can have reserved the durable lane after #request ran.
+  releaseRead({ day: new Date(AT).toISOString().slice(0, 10), used: 5,
+    blockedUntil: 0, quotaUntil: 0, nextRequestAt: AT + 300000 });
+  await assert.rejects(request, error => error.code === 'AVE_WAIT' && error.retryAt === AT + 300000);
+  assert.equal(f.starts.length, 0); assert.equal(f.read().totalUsed, 5);
+  assert.equal(f.client.metrics.estimatedCu, 0);
+});
+
+test('cancelled verification while waiting for the budget transaction never reserves CU or starts a late fetch', async () => {
+  let releaseRead, beginRead;
+  const reading = new Promise(resolve => { beginRead = resolve; });
+  const controller = new AbortController();
+  const f = fixture(undefined, { readBudget: () => { beginRead(); return new Promise(resolve => { releaseRead = resolve; }); } });
+  const request = f.client.verifyApiKey(KEY, { signal: controller.signal });
+  await reading; controller.abort();
+  await assert.rejects(request, { code: 'AVE_ABORTED' });
+  releaseRead(null); await tick();
+  assert.equal(f.starts.length, 0); assert.equal(f.read(), null);
+  assert.equal(f.client.metrics.estimatedCu, 0); assert.equal(f.client.snapshot().pending, 0);
+});
+
+test('verification preserves actual budget, quota and cooldown denials ahead of an ordinary pacing wait', async () => {
+  const nextHour = Math.floor(AT / 3600000) * 3600000 + 3600000;
+  const nextDay = Date.UTC(2026, 8, 23);
+  const cases = [
+    [{ totalUsed: 1000000 }, 'AVE_TOTAL_BUDGET', undefined],
+    [{ dailyUsed: 30000, totalUsed: 30000 }, 'AVE_BUDGET', nextDay],
+    [{ hourlyUsed: 1250, dailyUsed: 1250, totalUsed: 1250 }, 'AVE_HOURLY_BUDGET', nextHour],
+    [{ quotaUntil: AT + 7200000 }, 'AVE_QUOTA', AT + 7200000],
+    [{ blockedUntil: AT + 3600000 }, 'AVE_RATE_LIMITED', AT + 3600000],
+    [{ dailyUsed: 27000, totalUsed: 27000 }, 'AVE_DISCOVERY_RESERVE', nextDay]
+  ];
+  for (const [changes, code, retryAt] of cases) {
+    const initial = { budgetVersion: 2, day: new Date(AT).toISOString().slice(0, 10), dailyUsed: 0,
+      hourStartedAt: Math.floor(AT / 3600000) * 3600000, hourlyUsed: 0, totalUsed: 0,
+      periodStartedAt: AT - 86400000, legacyUsageIncluded: false, legacySnapshot: null,
+      blockedUntil: 0, quotaUntil: 0, nextRequestAt: AT + 300000, ...changes };
+    const f = fixture(undefined, { readBudget: () => structuredClone(initial),
+      pause: async () => assert.fail('verification must not sleep') });
+    await assert.rejects(f.client.verifyApiKey(KEY), error => error.code === code && error.retryAt === retryAt);
+    assert.equal(f.starts.length, 0); assert.equal(f.client.metrics.estimatedCu, 0);
+    assert.equal(f.read().totalUsed, initial.totalUsed);
+  }
+});
+
+test('verification gives a bounded wait while a timed-out physical transport is still settling', async () => {
+  let release;
+  const f = fixture(({ url, response }) => new Promise(resolve => { release = () => resolve(response(url)); }), { timeoutMs: 15 });
+  await assert.rejects(f.client.trending('bsc'), { code: 'AVE_TIMEOUT' });
+  await assert.rejects(f.client.verifyApiKey(KEY), { code: 'AVE_WAIT' });
+  assert.equal(f.starts.length, 1); assert.equal(f.read().totalUsed, 5);
+  release(); await tick(); f.advance(600000); await tick();
+  assert.equal(f.starts.length, 1); assert.equal(f.client.snapshot().transport.active, false);
+});
+
+test('a pending scan cannot mask exhausted budget as a verification queue wait', async () => {
+  let release;
+  const f = fixture(({ url, response }) => new Promise(resolve => { release = () => resolve(response(url)); }),
+    { hourlyBudgetCu: 5, discoveryReserveCu: 0 });
+  const scan = f.client.trending('bsc'); await tick();
+  await assert.rejects(f.client.verifyApiKey(KEY), error => error.code === 'AVE_HOURLY_BUDGET'
+    && error.retryAt === Math.floor(AT / 3600000) * 3600000 + 3600000);
+  assert.equal(f.starts.length, 1); assert.equal(f.read().totalUsed, 5);
+  release(); await scan; await tick();
+  assert.equal(f.client.metrics.estimatedCu, 5); assert.equal(f.starts.length, 1);
 });
 
 test('slow response body counts as transport time before the sixty-second gap', async () => {

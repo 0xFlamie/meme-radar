@@ -31,7 +31,7 @@ const DOCUMENTED = new Set(['bsc', 'eth', 'base', 'sol']);
 const ORIGIN = 'https://prod.ave-api.com';
 const lanes = new WeakMap();
 function sharedLane(now) {
-  if (!lanes.has(now)) lanes.set(now, { tail: Promise.resolve(), nextStart: 0, active: false, lastStart: 0 });
+  if (!lanes.has(now)) lanes.set(now, { tail: Promise.resolve(), nextStart: 0, active: false, lastStart: 0, queued: 0 });
   return lanes.get(now);
 }
 const WBNB = '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c';
@@ -45,6 +45,7 @@ const messages = {
   HOURLY_BUDGET: 'AVE 本机本小时行情预算不足，等待下一 UTC 小时',
   DISCOVERY_RESERVE: 'AVE 优先保留热榜扫描，补充行情与审核查询暂缓',
   RATE_LIMITED: 'AVE 行情限流，已进入冷却', UPSTREAM: 'AVE 行情请求未成功', BUSY: 'AVE 行情队列已满',
+  WAIT: 'AVE 扫描或请求间隔尚未结束，请稍后测试；本次未发送测试请求',
 };
 export class AveError extends Error {
   constructor(kind, status = 502, retryAt = null) {
@@ -585,11 +586,12 @@ export class AveClient {
     this.nextAllowedAt = Math.max(0, budget.blockedUntil > at ? budget.blockedUntil : 0, budget.quotaUntil > at ? budget.quotaUntil : 0,
       recoveryProbeAt, this.#budgetPauseUntil, this.#hourPauseUntil);
   }
-  async #reserve(job, cu) {
+  async #reserve(job, cu, { deferVerification = false } = {}) {
     while (true) {
       this.#alive(job);
       let waitUntil = 0, denied = null;
       await this.#updateBudget(b => {
+        this.#alive(job);
         const at = this.#now();
         // Persist a migration even when this request is denied. This also
         // installs the v2 old-writer guard before any subsequent request.
@@ -604,6 +606,15 @@ export class AveClient {
         if (b.hourlyUsed + cu > this.hourlyBudgetCu) return deny('HOURLY_BUDGET', nextHour(at));
         if (job.kind !== 'trending' && b.dailyUsed + cu > this.dailyBudgetCu - this.discoveryReserveCu) return deny('DISCOVERY_RESERVE', nextDay(at));
         const nextRequestAt = requestNotBefore(b);
+        // An explicit connection test must not become a hidden network read
+        // minutes after its HTTP caller has given up. Check durable limits
+        // first so exhausted budget/quota is never mislabeled as queueing.
+        // Recheck here after acquiring the budget transaction: another client
+        // or process may have reserved the shared lane since admission.
+        if (job.verification && (deferVerification || this.#lane.active || this.#lane.nextStart > at || nextRequestAt > at)) {
+          const retryAt = Math.max(this.#lane.nextStart, nextRequestAt);
+          return deny('WAIT', retryAt > at ? retryAt : null);
+        }
         if (nextRequestAt > at) { waitUntil = nextRequestAt; return b; }
         return { ...b, dailyUsed: b.dailyUsed + cu, hourlyUsed: b.hourlyUsed + cu, totalUsed: b.totalUsed + cu,
           nextRequestAt: at + spacing(b.rateControl) };
@@ -707,9 +718,9 @@ export class AveClient {
   }
   async #execute(job, kind, chain, ca, range) {
     this.#alive(job); validBudget(this.#budget, this.#now());
-    if (this.#lane.active) throw fail('BUSY', 503);
+    if (this.#lane.active && !job.verification) throw fail('BUSY', 503);
     const wait = Math.max(0, this.#lane.nextStart - this.#now());
-    if (wait) await this.#pause(wait);
+    if (wait && !job.verification) await this.#pause(wait);
     this.#alive(job); await this.#reserve(job, CU_BY_KIND[kind]); this.#alive(job);
     let path = kind === 'trending' ? '/v2/tokens/trending?chain=' + AVE_CHAINS[chain] + '&current_page=' + job.page + '&page_size=100' :
       kind === 'details' ? '/v2/tokens/' + ca + '-' + AVE_CHAINS[chain] :
@@ -803,11 +814,21 @@ export class AveClient {
       }
       let job = this.#pending.get(key);
       if (!job) {
+        if (verification && this.#lane.queued > 0) {
+          // Do not append verification to an existing scan queue, including
+          // another AveClient's queue. Read only the durable denial reason;
+          // #reserve cannot debit CU or call the transport in this branch.
+          job = { ...probe, key, subscribers: 0, done: false };
+          job.promise = this.#reserve(job, CU_BY_KIND[kind], { deferVerification: true });
+          job.promise.then(() => { job.done = true; }, () => { job.done = true; });
+          return this.#subscribe(job, signal);
+        }
         if (this.#pending.size >= 16) throw fail('BUSY', 429);
         job = { ...probe, key, subscribers: 0, done: false };
+        this.#lane.queued++;
         job.promise = this.#lane.tail.then(() => this.#execute(job, kind, chain, ca, range)); this.#pending.set(key, job);
         this.#lane.tail = job.promise.then(() => {}, () => {});
-        const done = () => { job.done = true; if (this.#pending.get(key) === job) this.#pending.delete(key); };
+        const done = () => { job.done = true; this.#lane.queued--; if (this.#pending.get(key) === job) this.#pending.delete(key); };
         job.promise.then(done, done);
       }
       return this.#subscribe(job, signal);

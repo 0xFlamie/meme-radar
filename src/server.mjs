@@ -804,12 +804,13 @@ function allowedChainIds(supportedChains) {
 
 const versionValue = value => typeof value === 'string' && /^(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})$/.test(value) ? value : null;
 const AVE_PUBLIC_CODES = new Set(['AVE_AUTH', 'AVE_RATE_LIMIT', 'AVE_RATE_LIMITED', 'AVE_QUOTA', 'AVE_BUDGET', 'AVE_HOURLY_BUDGET', 'AVE_TOTAL_BUDGET', 'AVE_BUDGET_STORE', 'AVE_DISCOVERY_RESERVE',
-  'AVE_STORAGE', 'AVE_SCHEMA', 'AVE_SIZE', 'AVE_TIMEOUT', 'AVE_CHANGED', 'AVE_ABORTED', 'AVE_DISABLED', 'AVE_BUSY', 'AVE_CONNECT',
+  'AVE_STORAGE', 'AVE_SCHEMA', 'AVE_SIZE', 'AVE_TIMEOUT', 'AVE_CHANGED', 'AVE_ABORTED', 'AVE_DISABLED', 'AVE_BUSY', 'AVE_CONNECT', 'AVE_WAIT',
   'AVE_NETWORK', 'AVE_UPSTREAM', 'AVE_CONFIG', 'AVE_KEY', 'AVE_INPUT', 'AVE_COOLDOWN', 'AVE_RELOAD', 'AVE_FIELD_UNVERIFIED', 'AVE_REQUEST_FAILED']);
 const UPDATE_PUBLIC_CODES = new Set(['UPDATE_NETWORK', 'UPDATE_STORAGE', 'UPDATE_LOCAL', 'UPDATE_CHECKSUM', 'UPDATE_ARCHIVE',
   'UPDATE_BUSY', 'UPDATE_VERSION', 'UPDATE_PLATFORM', 'UPDATE_DEPENDENCIES', 'UPDATE_HANDOFF', 'UPDATE_START']);
 const readSnapshot = callback => { try { return callback?.() || {}; } catch { return {}; } };
 const nonnegative = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+const publicAveRetryAt = (value, now = Date.now()) => Number.isSafeInteger(value) && value > now && value <= now + 366 * 86400000 ? value : null;
 const SCREENING_REASON_KEYS = ['stale', 'missing_market', 'market_cap', 'age', 'liquidity', 'activity', 'known_risk', 'other'];
 function publicScreening(source = {}, settings = {}) {
   source ||= {};
@@ -834,12 +835,14 @@ function publicScheduler(source, enabledChains, selectedChain, publicChains) {
 function publicAveConnection(source = {}) {
   const configured = source.configured === true || source.data?.configured === true;
   const data = source.data || {};
-  const status = ['connected', 'error', 'untested'].includes(data.status) ? data.status
+  const status = ['connected', 'error', 'untested', 'waiting'].includes(data.status) ? data.status
     : source.status === 'VERIFIED' ? 'connected' : 'untested';
   return { configured, requiresReentry: source.requiresReentry === true, hasStoredKey: source.hasStoredKey === true || configured,
     status: !configured ? 'UNCONFIGURED' : status === 'connected' ? 'VERIFIED' : source.status === 'CHECKING' ? 'CHECKING' : 'CONFIGURED',
     data: { configured, status, checkedAt: nonnegative(data.checkedAt), code: AVE_PUBLIC_CODES.has(data.code) ? data.code : null,
-      message: status === 'connected' ? 'AVE 行情接口测试通过；不代表可下单' : status === 'error' ? 'AVE 行情验证未通过，请检查错误代码' : 'AVE 行情尚未测试' },
+      retryAt: AVE_PUBLIC_CODES.has(data.code) ? publicAveRetryAt(data.retryAt) : null,
+      message: status === 'connected' ? 'AVE 行情接口测试通过；不代表可下单' : status === 'error' ? 'AVE 行情验证未通过，请检查错误代码'
+        : status === 'waiting' ? 'AVE 行情测试暂缓，请查看原因与重试时间' : 'AVE 行情尚未测试' },
     trade: { configured: false, status: 'disabled' }, executionReady: false,
     executionReason: '仅接入 AVE 行情；没有连接钱包、签名或下单能力' };
 }
@@ -942,13 +945,34 @@ export function createServer({ state, settings, controls, switchChain,
     if (req.method === 'POST' && ['/api/ave-configure', '/api/ave-remove'].includes(url.pathname)) {
       if (!req.headers.origin) return sendJson(res, 403, { error: 'local_request_required' }, csp);
       if (!ave) return sendJson(res, 503, { error: 'ave_unavailable' }, csp);
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      // IncomingMessage.close also fires after a fully uploaded normal POST.
+      // Cancel only an aborted upload or a disconnected unfinished response.
+      const responseClosed = () => { if (!res.writableEnded) abort(); };
+      const checkAuthority = () => {
+        if (controller.signal.aborted || req.aborted || res.destroyed)
+          throw new AveError('AVE_ABORTED', 'AVE 行情测试已取消', 409);
+      };
+      req.once('aborted', abort);
+      res.once('close', responseClosed);
       try {
         const body = await readSmallJson(req, 4096);
-        const result = url.pathname.endsWith('configure') ? await ave.configure(body) : ave.remove(body);
+        checkAuthority();
+        const result = url.pathname.endsWith('configure')
+          ? await ave.configure(body, checkAuthority, { signal: controller.signal }) : ave.remove(body);
+        checkAuthority();
         return sendJson(res, 200, { ave: publicAveConnection(result) }, csp);
-      } catch (e) { return sendJson(res, e instanceof AveError && [400, 409, 429, 502, 503, 504].includes(e.status) ? e.status
-        : [400, 413, 415].includes(e.statusCode) ? e.statusCode : 503,
-      { error: AVE_PUBLIC_CODES.has(e?.code) ? e.code : 'AVE_STORAGE', ave: aveSnapshot() }, csp); }
+      } catch (e) {
+        if (controller.signal.aborted || req.aborted || res.destroyed || res.writableEnded) return;
+        const code = AVE_PUBLIC_CODES.has(e?.code) ? e.code : 'AVE_STORAGE';
+        return sendJson(res, e instanceof AveError && [400, 409, 429, 502, 503, 504].includes(e.status) ? e.status
+          : [400, 413, 415].includes(e.statusCode) ? e.statusCode : 503,
+        { error: code, retryAt: AVE_PUBLIC_CODES.has(e?.code) ? publicAveRetryAt(e.retryAt) : null, ave: aveSnapshot() }, csp);
+      } finally {
+        req.removeListener('aborted', abort);
+        res.removeListener('close', responseClosed);
+      }
     }
 
     if (req.method === 'POST' && ['/api/live-discovery', '/api/live-review'].includes(url.pathname)) {

@@ -56,7 +56,7 @@ test('community production entry uses only local AVE credentials and never loads
   const main = fs.readFileSync(path.join(root, 'src/main.mjs'), 'utf8');
   assert.match(main, /import\s*\{\s*AveClient\s*\}\s*from\s*['"]\.\/ave\.mjs['"]/);
   assert.match(main, /apiKeyProvider:\s*\(\)\s*=>\s*ave\.getKey\(\)/);
-  assert.match(main, /verifyData:\s*key\s*=>\s*market\.verifyApiKey\(key\)/);
+  assert.match(main, /verifyData:\s*\(key,\s*options\)\s*=>\s*market\.verifyApiKey\(key,\s*options\)/);
   assert.match(main, /const sharedRequestIntervalMs\s*=\s*5\s*\*\s*60_000/);
   assert.match(main, /minimumGapMs:\s*sharedRequestIntervalMs/);
   assert.match(main, /new Scanner\(\{[^;]+sharedRequestIntervalMs/);

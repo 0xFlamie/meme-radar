@@ -118,6 +118,8 @@ test('session by-kind counters distinguish reservations, dispatches, endpoint ca
   await f.client.discover('bsc'); await f.client.trending('bsc'); await f.client.discover('bsc');
   await f.client.details('bsc', CA); await f.client.pairDetails('bsc', POOL);
   await f.client.tokenKlines('bsc', CA); await f.client.tokenKlines('bsc', CA);
+  await assert.rejects(f.client.verifyApiKey('candidate-public-key'), { code: 'AVE_WAIT' });
+  f.advance(60000);
   await f.client.verifyApiKey('candidate-public-key');
   const snapshot = f.client.snapshot(), metrics = snapshot.metrics;
   assert.equal(metrics.scope, 'session'); assert.equal(metrics.requests, 5); assert.equal(metrics.estimatedCu, 30);

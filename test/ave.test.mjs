@@ -194,7 +194,7 @@ test('a main_pair hint neither pins an old quote nor approves an unbound pair au
   assert.equal(audit.pool.liquidity, undefined);
 });
 
-test('details, K lines, and candidate key verification share a sixty-second completion gap and one budget', async () => {
+test('candidate key verification defers instead of queueing behind scans and still shares their gap and budget', async () => {
   const f = fixture({ fetchImpl: undefined });
   // The key test response may omit token but must still match BSC and the requested token if echoed.
   const calls = [], clock = () => f.now();
@@ -204,7 +204,13 @@ test('details, K lines, and candidate key verification share a sixty-second comp
       const body = responseFor(url); if (url.includes('0xbb4c')) delete body.data.token.token;
       return Response.json(body);
     } });
-  await Promise.all([client.details('bsc', CA), client.tokenKlines('bsc', CA), client.verifyApiKey('different-public-mock-key')]);
+  const scans = Promise.all([client.details('bsc', CA), client.tokenKlines('bsc', CA)]);
+  await assert.rejects(client.verifyApiKey('different-public-mock-key'), { code: 'AVE_WAIT' });
+  await scans;
+  await assert.rejects(client.verifyApiKey('different-public-mock-key'), error => error.code === 'AVE_WAIT' && error.retryAt === clock() + 60000);
+  assert.equal(calls.length, 2); assert.equal(client.snapshot().budget.used, 15);
+  f.advance(60000);
+  await client.verifyApiKey('different-public-mock-key');
   assert.equal(calls.length, 3);
   assert.ok(calls[1].at - calls[0].at >= 60000); assert.ok(calls[2].at - calls[1].at >= 60000);
   assert.equal(calls[2].init.headers['X-API-KEY'], 'different-public-mock-key');

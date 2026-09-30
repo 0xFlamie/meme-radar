@@ -44,7 +44,7 @@ const sharedRequestIntervalMs = 5 * 60_000;
 const market = new AveClient({ directory: config.stateDir, apiKeyProvider: () => ave.getKey(), enrichLimit: 0,
   maxTrendingPages: 1, rotateTrendingPages: true, minimumGapMs: sharedRequestIntervalMs });
 const ave = createAveSettings({ directory: config.stateDir,
-  verifyData: key => market.verifyApiKey(key),
+  verifyData: (key, options) => market.verifyApiKey(key, options),
   onChange: () => { market.resetCredentials(); scanner?.requestCycle(); }
 });
 // Keep old history and credentials on disk, but never reuse a previous

@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
+import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { createServer, healthSnapshot } from '../src/server.mjs';
-import { createAveSettings } from '../src/ave-settings.mjs';
+import { AveError, createAveSettings } from '../src/ave-settings.mjs';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import http from 'node:http';
 
 const settings = { port: 3791, version: '0.1.8', publicDir: fileURLToPath(new URL('../public', import.meta.url)) };
 const headers = { origin: 'http://127.0.0.1:3791', 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' };
@@ -15,11 +17,101 @@ function dispatch(server, path, { method = 'POST', body = {}, extraHeaders = {} 
     const req = Readable.from([Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))]);
     Object.assign(req, { method, url: path, headers: { host: '127.0.0.1:3791', ...headers, ...extraHeaders }, socket: { remoteAddress: '127.0.0.1' } });
     let status;
-    const res = { setHeader() {}, writeHead(code) { status = code; }, end(content) { resolve({ status, body: JSON.parse(content) }); } };
+    const res = Object.assign(new EventEmitter(), { setHeader() {}, writeHead(code) { status = code; },
+      end(content) { this.writableEnded = true; resolve({ status, body: JSON.parse(content) }); } });
     Promise.resolve(server.listeners('request')[0](req, res)).catch(reject);
   });
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('AVE connection errors preserve only allowlisted codes and bounded future retry times', async () => {
+  const future = Date.now() + 60_000, privateMessage = 'fixture-private-key https://private.invalid/?key=fixture-private-key';
+  for (const code of ['AVE_WAIT', 'AVE_HOURLY_BUDGET', 'AVE_TOTAL_BUDGET', 'AVE_DISCOVERY_RESERVE', 'AVE_NETWORK', 'AVE_UPSTREAM']) {
+    const error = Object.assign(new AveError(code, privateMessage, code === 'AVE_NETWORK' || code === 'AVE_UPSTREAM' ? 502 : 429),
+      { retryAt: future, headers: { authorization: privateMessage } });
+    const server = createServer({ settings, state: { value: {} }, ave: {
+      snapshot: () => ({ configured: true, data: { status: 'error', code, retryAt: future, message: privateMessage } }),
+      configure: async () => { throw error; }
+    } });
+    const result = await dispatch(server, '/api/ave-configure');
+    assert.equal(result.status, error.status); assert.equal(result.body.error, code);
+    assert.equal(result.body.retryAt, future); assert.equal(result.body.ave.data.retryAt, future);
+    assert.equal(result.body.ave.data.code, code);
+    assert.doesNotMatch(JSON.stringify(result.body), /fixture-private-key|private\.invalid|authorization|headers/);
+  }
+  for (const retryAt of [-1, 0, Date.now() - 60_000, Date.now() + 367 * 86400000, Infinity, NaN, String(future), {}, null]) {
+    const server = createServer({ settings, state: { value: {} }, ave: {
+      snapshot: () => ({ configured: true, data: { status: 'error', code: 'AVE_WAIT', retryAt } }),
+      configure: async () => { throw Object.assign(new AveError('AVE_WAIT', privateMessage, 429), { retryAt }); }
+    } });
+    const result = await dispatch(server, '/api/ave-configure');
+    assert.equal(result.body.retryAt, null); assert.equal(result.body.ave.data.retryAt, null);
+  }
+  const server = createServer({ settings, state: { value: {} }, ave: {
+    snapshot: () => ({ configured: true, data: { status: 'error', code: privateMessage, retryAt: future } }),
+    configure: async () => { throw Object.assign(new Error(privateMessage), { code: privateMessage, retryAt: future }); }
+  } });
+  const result = await dispatch(server, '/api/ave-configure');
+  assert.equal(result.body.error, 'AVE_STORAGE'); assert.equal(result.body.retryAt, null);
+  assert.equal(result.body.ave.data.code, null); assert.equal(result.body.ave.data.retryAt, null);
+  assert.doesNotMatch(JSON.stringify(result.body), /fixture-private-key|private\.invalid/);
+});
+
+test('normal API configure uploads succeed, but disconnected clients cannot commit a late verification', { timeout: 10_000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'radar-http-cancel-'));
+  let clock = Date.now(), mode = 'ok', release, began, done, observedSignal, changes = 0;
+  const started = new Promise(resolve => { began = resolve; });
+  const completed = new Promise(resolve => { done = resolve; });
+  const actual = createAveSettings({ directory, now: () => clock,
+    verifyData: async (_key, { signal } = {}) => {
+      if (mode === 'pending') {
+        observedSignal = signal;
+        await new Promise(resolve => { release = resolve; began(); }); // Deliberately ignore cancellation until released.
+      }
+      return { connected: true };
+    }, onChange: () => { changes++; } });
+  const localSettings = { ...settings, port: 0 };
+  const server = createServer({ settings: localSettings, state: { value: {} }, ave: {
+    snapshot: actual.snapshot,
+    configure: (...args) => actual.configure(...args).finally(() => { if (mode === 'pending') done(); })
+  } });
+  let client;
+  try {
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    localSettings.port = server.address().port;
+    const url = 'http://127.0.0.1:' + localSettings.port + '/api/ave-configure';
+    const localHeaders = { ...headers, origin: 'http://127.0.0.1:' + localSettings.port };
+    const normal = await new Promise((resolve, reject) => {
+      const req = http.request(url, { method: 'POST', headers: localHeaders }, res => {
+        let body = ''; res.setEncoding('utf8'); res.on('data', chunk => { body += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(body) }));
+      });
+      req.once('error', reject); req.end(JSON.stringify({ key: 'normal-fixture-key' }));
+    });
+    assert.equal(normal.status, 200); assert.equal(normal.body.ave.data.status, 'connected');
+    assert.equal(actual.getKey(), 'normal-fixture-key'); assert.equal(changes, 1);
+    clock += 61_000; mode = 'pending';
+    let unexpectedResponse = false;
+    client = http.request(url, { method: 'POST', headers: localHeaders }, res => { unexpectedResponse = true; res.resume(); });
+    client.on('error', () => {}); client.end(JSON.stringify({ key: 'cancelled-fixture-key' }));
+    await started;
+    assert.ok(observedSignal instanceof AbortSignal);
+    assert.equal(observedSignal.aborted, false, 'a complete normal upload is not cancellation');
+    const cancelled = new Promise(resolve => observedSignal.addEventListener('abort', resolve, { once: true }));
+    client.destroy(); await cancelled;
+    release(); await completed; await tick();
+    assert.equal(actual.getKey(), 'normal-fixture-key'); assert.equal(changes, 1);
+    assert.equal(unexpectedResponse, false);
+    assert.equal(JSON.parse(readFileSync(join(directory, 'ave-credentials.json'), 'utf8')).key, 'normal-fixture-key');
+    clock += 61_000; mode = 'ok';
+    await actual.configure({ key: '' }); // Cancelled operations must release busy state.
+    assert.equal(changes, 2);
+  } finally {
+    client?.destroy(); release?.(); server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('status exposes allowlisted shared scheduling and market-only screening without refreshing evidence', async () => {
   const now = Date.now(), next = now + 600_000, observedAt = now - 120_000;

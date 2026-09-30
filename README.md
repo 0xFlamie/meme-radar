@@ -2,17 +2,16 @@
 
 作者：**DeFi狙击手** · X：[@bi_9527zx](https://x.com/bi_9527zx)
 
-本地运行的多链 Meme 候选雷达。AVE 负责热榜发现；受支持链使用批量 DexScreener 行情补齐卡片，不额外消耗 AVE CU。默认快速扫描不逐币进行 GoPlus 或 K 线深审。当前版本 **v0.1.11**，按免费 API 的请求限制设计。
+本地运行的多链 Meme 候选雷达。AVE 负责热榜发现；受支持链使用批量 DexScreener 行情补齐卡片，不额外消耗 AVE CU。默认快速扫描不逐币进行 GoPlus 或 K 线深审。当前版本 **v0.1.12**，按免费 API 的请求限制设计。
 
-### v0.1.11 更新重点
+### v0.1.12 更新重点
 
-- 界面更简洁：候选统一展示，移除历史事件和表现验证面板。
-- 发现更有序：新鲜候选优先，旧线索到期移除，入选时间与行情更新时间分开显示。
-- 连接更稳健：慢行情补充不再拖住候选接口，修复误报本地离线，保留限频退避与额度保护。
-- 多链更清楚：链按钮标明是否加入轮询，避免把可点击入口当成正在扫描。
-- 保留中英文语音切换、播报置顶和一键直达 AVE；清理旧数据源依赖，升级资料可安全迁移。
+- 修复 API 连接检测排队过久、被误报为网络失败的问题；暂时不能发起测试时立即说明原因。
+- 区分请求等待、限频、额度不足、Key 无效与网络异常；有可靠重试时间时直接显示。
+- 测试结果不再被页面自动刷新覆盖；取消或超时不会在后台继续保存 Key，更换失败保留原配置。
+- 保留免费 API 的限频和预算保护；中英文语音、提醒置顶、多链候选和 AVE 快捷入口不变。
 
-完整说明见 [v0.1.11 更新记录](docs/RELEASE-NOTES-v0.1.11.md)。
+完整说明见 [v0.1.12 更新记录](docs/RELEASE-NOTES-v0.1.12.md)。
 
 使用与配置教程请查看 X：[@bi_9527zx](https://x.com/bi_9527zx) 的置顶内容。
 
@@ -34,9 +33,9 @@
 
 ## 下载
 
-- [Windows x64 一键便携版](https://github.com/nhovongoc0-max/meme-radar/releases/download/v0.1.11/MemeRadar-OpenSource-Windows-x64-0.1.11.zip)
-- [macOS 版](https://github.com/nhovongoc0-max/meme-radar/releases/download/v0.1.11/MemeRadar-OpenSource-macOS-0.1.11.zip)
-- [SHA-256 校验文件](https://github.com/nhovongoc0-max/meme-radar/releases/download/v0.1.11/SHA256SUMS-0.1.11.txt)
+- [Windows x64 一键便携版](https://github.com/nhovongoc0-max/meme-radar/releases/download/v0.1.12/MemeRadar-OpenSource-Windows-x64-0.1.12.zip)
+- [macOS 版](https://github.com/nhovongoc0-max/meme-radar/releases/download/v0.1.12/MemeRadar-OpenSource-macOS-0.1.12.zip)
+- [SHA-256 校验文件](https://github.com/nhovongoc0-max/meme-radar/releases/download/v0.1.12/SHA256SUMS-0.1.12.txt)
 
 也可以在 [Releases](https://github.com/nhovongoc0-max/meme-radar/releases) 页面查看版本说明与文件校验值。
 
@@ -69,6 +68,8 @@
 ### 连接 AVE
 
 展开 **设置与运行记录 → AVE API**，填入自己的 AVE API Key，点击 **保存 / 测试**。验证成功后保存并开始只读扫描；以后重启不需重复填写。无需公钥、私钥或连接钱包。所有行情请求共用限流与本机预算；实际消耗以 AVE 账户为准。
+
+连接检测不会排队数分钟：扫描占用请求通道、限频或预算不足时，会立即提示原因，并在有可靠时间时显示何时可重试；请届时再点击测试。此类等待不代表 Key 无效。测试超时或页面断开后不会补存 Key，更换 Key 验证失败也不会覆盖原配置。
 
 默认本机累计预算 1,000,000 CU，每日最多 30,000 CU，每个 UTC 整点小时最多 1,250 CU。所有 AVE 请求共用全局队列和缓存；生产扫描在全局范围内每 5 分钟最多发起一条链的热榜请求，启用多链时轮询各链，不是每条链各自每 5 分钟请求一次。这是本机消费保护，不是 AVE 账户余额或套餐周期承诺；账户其他软件用量、迁移前未知历史均不在本机估算内。
 

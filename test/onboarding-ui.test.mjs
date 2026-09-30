@@ -11,10 +11,10 @@ const source = html.slice(start, end);
 test('AVE Key form waits for Data verification, blocks duplicate submission and clears secrets on every result', async () => {
   for (const item of [
     { ok: true, body: { ave: { configured: true, data: { configured: true, status: 'connected' } } }, badge: 'aveChecked', refreshes: 1 },
-    { ok: false, body: { error: 'AVE_AUTH', ave: { configured: true, data: { configured: true, status: 'error' } } }, badge: 'aveFailed', refreshes: 0, error: 'AVE_AUTH' },
-    { ok: false, body: { error: 'AVE_RATE_LIMIT', ave: { configured: false, data: { status: 'error' } } }, badge: 'aveFailed', refreshes: 0, error: 'AVE_RATE_LIMIT' },
-    { ok: false, body: { error: '<script>raw-private-fixture</script>', ave: { configured: false, data: { status: 'error' } } }, badge: 'aveFailed', refreshes: 0, error: 'AVE_REQUEST' },
-    { network: true, badge: '', refreshes: 0, error: 'AVE_CONNECT' },
+    { ok: false, body: { error: 'AVE_AUTH', ave: { configured: true, data: { configured: true, status: 'error' } } }, badge: 'aveFailed', refreshes: 0, error: 'AVE_AUTH', notice: 'aveTestAuth' },
+    { ok: false, body: { error: 'AVE_RATE_LIMIT', ave: { configured: false, data: { status: 'waiting' } } }, badge: 'aveDeferred', refreshes: 0, error: 'AVE_RATE_LIMIT', notice: 'aveApiRate' },
+    { ok: false, body: { error: '<script>raw-private-fixture</script>', ave: { configured: false, data: { status: 'error' } } }, badge: 'aveFailed', refreshes: 0, error: 'AVE_CONNECT', notice: 'aveTestUnknown' },
+    { network: true, badge: '', refreshes: 0, error: 'AVE_CONNECT', notice: 'aveTestUnknown' },
   ]) {
     const key = 'private-fixture-api-key';
     const ids = ['ave-api-key', 'ave-config-status', 'ave-data-status', 'aveSummary', 'aveSettings'];
@@ -40,7 +40,7 @@ test('AVE Key form waits for Data verification, blocks duplicate submission and 
     finish(); await pending;
     assert.equal(elements['ave-api-key'].value, ''); assert.ok(buttons.every(button => !button.disabled));
     assert.equal(elements['ave-data-status'].textContent, item.badge); assert.equal(refreshes, item.refreshes);
-    if (item.error) assert.equal(elements['ave-config-status'].textContent, 'aveFailed · ' + item.error);
+    if (item.error) assert.equal(elements['ave-config-status'].textContent, item.notice + ' · ' + item.error);
     assert.doesNotMatch(JSON.stringify(elements), /private-fixture-api-key|raw-private-fixture|<script>/);
   }
 });

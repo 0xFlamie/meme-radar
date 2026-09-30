@@ -120,6 +120,128 @@ test('AVE failed retest updates the Data badge while retaining the failure notic
   assert.match(elements['ave-config-status'].textContent, /AVE_AUTH/);
 });
 
+const AVE_UI_AT = Date.UTC(2026, 8, 30, 12);
+function aveConnectionHarness(fetch) {
+  const elements = Object.fromEntries(['ave-api-key', 'ave-config-status', 'ave-data-status', 'aveSummary',
+    'aveSettings', 'languageSelect', 'notice'].map(id => [id, { dataset: {}, textContent: '', value: '',
+    getAttribute(name) { return name === 'data-i18n' ? this.dataset.i18n : undefined; }, setAttribute() {} }]));
+  const buttons = [{ disabled: false }, { disabled: false }];
+  const saved = { configured: true, data: { configured: true, status: 'connected' } };
+  const context = { fetch, AbortSignal, currentLocale: 'zh-CN', supportedLocales: ['zh-CN', 'en'],
+    Date: class extends Date { static now() { return AVE_UI_AT; } },
+    byId: id => elements[id], formatClock: value => 'clock:' + value,
+    document: { documentElement: {}, querySelectorAll(selector) {
+      if (selector === '.ave-settings button') return buttons;
+      if (selector === '[data-i18n]') return Object.values(elements).filter(element => element.dataset.i18n);
+      return [];
+    } },
+    writeStorage() {}, window: { dispatchEvent() {} }, CustomEvent: class {},
+    renderChainSwitcher() {}, renderTelemetry() {}, lastData: { aveConnection: saved },
+    refresh() {},
+  };
+  context.t = (key, args) => context.currentLocale + ':' + key + (args ? ':' + JSON.stringify(args) : '');
+  context.render = data => context.renderAveConnection(data.aveConnection);
+  const connector = html.slice(html.indexOf('let aveBusy'), html.indexOf('async function refresh()'));
+  const locales = html.slice(html.indexOf('function applyStaticTranslations()'), html.indexOf('const number = function'));
+  vm.runInNewContext(connector + locales + ';this.feedback=()=>aveFeedback;this.isBusy=()=>aveBusy;', context);
+  context.renderAveConnection(saved);
+  return { context, elements, buttons, saved };
+}
+
+test('AVE connection feedback distinguishes budgets, queue wait and real network/upstream failures', async () => {
+  const mapped = { AVE_HOURLY_BUDGET: 'aveHourlyPaused', AVE_TOTAL_BUDGET: 'aveTotalPaused',
+    AVE_DISCOVERY_RESERVE: 'aveTestReserved', AVE_WAIT: 'aveTestWaiting', AVE_NETWORK: 'aveTestNetwork', AVE_UPSTREAM: 'aveTestUpstream' };
+  for (const [code, message] of Object.entries(mapped)) {
+    const retryAt = AVE_UI_AT + 7200000;
+    const snapshot = { configured: true, data: { configured: true,
+      status: ['AVE_NETWORK', 'AVE_UPSTREAM'].includes(code) ? 'error' : 'waiting', code, retryAt } };
+    const { context, elements } = aveConnectionHarness(async () => ({ ok: false, json: async () => ({ error: code, retryAt, ave: snapshot }) }));
+    elements['ave-api-key'].value = 'synthetic-form-key';
+    await context.changeAve('configure');
+    assert.match(elements['ave-config-status'].textContent, new RegExp('zh-CN:' + message));
+    assert.match(elements['ave-config-status'].textContent, new RegExp('clock:' + retryAt));
+    assert.equal(elements['ave-data-status'].textContent, 'zh-CN:' + (snapshot.data.status === 'waiting' ? 'aveDeferred' : 'aveFailed'));
+    assert.equal(elements['ave-api-key'].value, '');
+    assert.doesNotMatch(elements['ave-config-status'].textContent, /synthetic-form-key/);
+  }
+});
+
+test('AVE failure notice survives status polling and changes language without reverting to Key saved', async () => {
+  const { context, elements, saved } = aveConnectionHarness(async () => ({ ok: false,
+    json: async () => ({ error: 'AVE_WAIT', retryAt: AVE_UI_AT + 300000, ave: { configured: true, data: { status: 'waiting' } } }) }));
+  await context.changeAve('configure');
+  context.renderAveConnection(saved);
+  assert.match(elements['ave-config-status'].textContent, /zh-CN:aveTestWaiting/);
+  assert.equal(elements['ave-config-status'].dataset.i18n, undefined);
+  context.setLocale('en', true);
+  assert.match(elements['ave-config-status'].textContent, /en:aveTestWaiting/);
+  assert.doesNotMatch(elements['ave-config-status'].textContent, /aveKeySaved|zh-CN:/);
+  context.lastData = null;
+  context.setLocale('zh-CN', true);
+  assert.match(elements['ave-config-status'].textContent, /zh-CN:aveTestWaiting/,
+    'feedback must also change language before the first main status snapshot arrives');
+});
+
+test('AVE busy notice remains visible during polling and a language switch', async () => {
+  let release;
+  const { context, elements, buttons, saved } = aveConnectionHarness(() => new Promise(resolve => { release = resolve; }));
+  const request = context.changeAve('configure');
+  assert.equal(context.isBusy(), true); assert.ok(buttons.every(button => button.disabled));
+  context.renderAveConnection(saved);
+  assert.equal(elements['ave-config-status'].textContent, 'zh-CN:aveChecking');
+  context.setLocale('en', true);
+  assert.equal(elements['ave-config-status'].textContent, 'en:aveChecking');
+  release({ ok: true, json: async () => ({ ave: saved }) }); await request;
+  assert.equal(context.isBusy(), false); assert.ok(buttons.every(button => !button.disabled));
+  assert.equal(elements['ave-config-status'].textContent, 'en:aveKeySaved');
+});
+
+test('delayed AVE status response cannot replace a newly successful configure result', async () => {
+  let release;
+  const { context, elements, saved } = aveConnectionHarness(url => url === '/api/ave-status'
+    ? new Promise(resolve => { release = resolve; })
+    : Promise.resolve({ ok: true, json: async () => ({ ave: saved }) }));
+  const oldPoll = context.refreshAve();
+  await context.changeAve('configure');
+  release({ ok: true, json: async () => ({ ave: { configured: false, data: { configured: false, status: 'untested' } } }) });
+  await oldPoll;
+  assert.equal(elements['ave-config-status'].textContent, 'zh-CN:aveKeySaved');
+  assert.equal(elements['ave-data-status'].textContent, 'zh-CN:aveChecked');
+  assert.equal(elements['aveSummary'].textContent, ' · zh-CN:aveKeySaved');
+});
+
+test('successful manual retry clears the previous AVE failure and never returns it on later polls', async () => {
+  let succeed = false;
+  const { context, elements, saved } = aveConnectionHarness(async () => ({ ok: succeed,
+    json: async () => succeed ? { ave: saved } : { error: 'AVE_NETWORK', ave: { configured: true, data: { status: 'error' } } } }));
+  await context.changeAve('configure');
+  assert.match(elements['ave-config-status'].textContent, /aveTestNetwork/);
+  succeed = true; await context.changeAve('configure');
+  assert.equal(context.feedback(), null);
+  context.renderAveConnection(saved);
+  assert.equal(elements['ave-config-status'].textContent, 'zh-CN:aveKeySaved');
+});
+
+test('AVE feedback ignores invalid retry timestamps and never displays raw unknown error payloads', async () => {
+  for (const retryAt of [undefined, Infinity, NaN, -1, AVE_UI_AT, AVE_UI_AT + 0.5,
+    String(AVE_UI_AT + 300000), AVE_UI_AT + 367 * 86400000]) {
+    const { context, elements } = aveConnectionHarness(async () => ({ ok: false,
+      json: async () => ({ error: 'AVE_WAIT', retryAt }) }));
+    await context.changeAve('configure');
+    assert.match(elements['ave-config-status'].textContent, /aveTestWaiting/);
+    assert.doesNotMatch(elements['ave-config-status'].textContent, /aveTestRetryAt|clock:/);
+  }
+  for (const secret of ['synthetic-private-key-in-upstream-text', 'AVE_SYNTHETIC_SECRET_KEY']) {
+    for (const fetch of [async () => ({ ok: false, json: async () => ({ error: secret }) }),
+      async () => { throw new Error(secret); }]) {
+      const { context, elements } = aveConnectionHarness(fetch);
+      await context.changeAve('configure');
+      assert.match(elements['ave-config-status'].textContent, /aveTestUnknown/);
+      assert.equal(elements['ave-config-status'].textContent.includes(secret), false);
+    }
+  }
+});
+
 test('所有内联脚本均可通过语法解析', () => {
   const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)];
   assert.ok(scripts.length >= 2);
@@ -362,7 +484,7 @@ test('AVE 单 Key 仅提交给同源接口且不会持久化或回显', () => {
   assert.match(source, /fetch\('\/api\/ave-' \+ action/);
   assert.match(source, /body: JSON\.stringify\(body\)/);
   assert.match(source, /byId\('ave-api-key'\)\.value = ''/);
-  assert.match(source, /if \(!response\.ok\) throw/);
+  assert.match(source, /if \(!response\.ok\)\s*\{[\s\S]*?throw/);
   assert.match(source, /renderAveConnection\(result\.ave\)/);
   assert.doesNotMatch(source, /localStorage|sessionStorage|readStorage|writeStorage/);
   assert.doesNotMatch(source, /console\.|innerHTML|textContent\s*=\s*result\./);
