@@ -8,10 +8,10 @@
 
 ## 当前状态
 
-- 2026-10-01只读核查：上游最新v0.1.12（`7ecd342`，9月30日发布），服务器仍`9c29ac8`/v0.1.8；未合并或升级。服务failed，退出码1、NRestarts6，9月24日17:37:59进入失败状态，现有journal查询无原因记录，根因未确定。
-- 新版是AVE-only免费模式，移除GMGN客户端/公钥配置；全局5分钟最多一条链请求，默认禁用逐币深审和新增/回补影子样本。升级需验证现有代理及持久状态兼容，并由用户配置AVE Key；不能沿用旧版深审/实时性描述。
-- 2026-09-21 21:09+08：已按用户授权部署 txvps，应用提交 `a1a502499efa583b0609f899753bf94bfe9cf9e4`，远端 `0xFlamie/meme-radar`。
+- 2026-10-01 00:28:35+08：按用户授权升级v0.1.12，应用提交 `af5b56848acac334e18c46898f9221e17eae87f8`（合并上游7ecd342），服务器 `/opt/meme-radar`，远端 `0xFlamie/meme-radar`。
+- 新版AVE-only，移除GMGN客户端/公钥配置；全局5分钟最多一条链请求，默认禁用逐币深审和新增/回补影子样本。当前 `AVE_AUTH_REQUIRED`，待用户在网页配置AVE行情Key；官方入口 `https://cloud.ave.ai/login`，无需Agent公钥。
 - `https://meme.polymeow.com` 经 Cloudflare、Caddy 独立 Basic Auth 转发 `127.0.0.1:3791`；用户名 meme，密码不入库。专用 systemd 已 enabled/active，半核 CPU/384MiB 内存限制。
-- 本机及服务器 135 项测试、发布审计、真实 Caddy 反代测试均通过；公开 HTTPS 正确登录200、无登录/错误密码401、恶意/缺失Origin写入403。DN 与 rhlit HTTP200，零重启；未配置API时服务内存约19MB，不能代表扫描峰值。
-- 当前 `GMGN_AUTH_REQUIRED`，待用户在网页创建 Agent 公钥并绑定只读 GMGN API；密钥将保存在服务器 state/，不包含 Telegram。
+- 本机/服务器各449测试、源码审计、AVE配置实际Caddy反代回归通过。服务器测试依赖zip已补齐。公开HTTPS登录/版本/AVE状态及恶意、缺失Origin拒绝通过；隔离Chrome实测页面和AVE表单正常、脚本异常0。
+- 00:30验收active、NRestarts0、约21MB；DN/rhlit HTTP200。用户未配置Key，尚未验证真实AVE扫描或扫描峰值；无Telegram。旧服务9/24曾exit1，历史日志已不可用，本轮重启旧版即正常，原根因未确定。
+- 升级前state备份 `/var/backups/meme-radar/state-before-v0112-20261001T002832.tar.gz`（仅root），旧代码 `9c29ac8`。回滚时先停止并保留新版state，再按Git恢复旧版和备份状态，不能混用迁移后的状态；不得读取或输出凭证。隔离验证工作树 `/opt/meme-radar-verify-v0112` 保留。
 - Caddy 初始回滚备份 `/etc/caddy/Caddyfile.before-meme-20260921`。回滚只撤销本项目 import 并停止 meme-radar；若其他站点后续更新，不得整份覆盖旧 Caddy 配置。
