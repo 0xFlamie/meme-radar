@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 
 const PROXY_ENV_KEYS = ['HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'https_proxy', 'http_proxy', 'all_proxy'];
 const INTERNET_SETTINGS = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
-const GMGN_ORIGIN = 'https://openapi.gmgn.ai/';
+const AVE_ORIGIN = 'https://prod.ave-api.com/';
 
 export function normalizeProxyUrl(value) {
   let candidate = String(value || '').trim().replace(/^['"]|['"]$/g, '');
@@ -38,7 +38,7 @@ export function detectWindowsSystemProxy({ platform = process.platform, env = pr
   // Resolve the effective WinINET proxy first. This covers ordinary manual
   // proxies and most PAC configurations used by desktop VPN applications.
   try {
-    const script = "$u=[Uri]'https://openapi.gmgn.ai/';$p=[System.Net.WebRequest]::GetSystemWebProxy().GetProxy($u);if($p -and $p.AbsoluteUri -ne $u.AbsoluteUri){[Console]::Out.Write($p.AbsoluteUri)}";
+    const script = `$u=[Uri]'${AVE_ORIGIN}';$p=[System.Net.WebRequest]::GetSystemWebProxy().GetProxy($u);if($p -and $p.AbsoluteUri -ne $u.AbsoluteUri){[Console]::Out.Write($p.AbsoluteUri)}`;
     const proxy = normalizeProxyUrl(run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
       encoding: 'utf8', windowsHide: true, timeout: 5000
     }));

@@ -22,6 +22,8 @@ const dump = at => series([1, .65, .35, .18, .18, .18, .18, .18, .18], at);
 const discovery = at => ({ address, chain: 'bsc', market_cap: 50000, liquidity: 12000,
   creation_timestamp: at / 1000 - 600, rug_ratio: .1, bundler_rate: .05,
   rat_trader_amount_rate: .05, is_wash_trading: false, is_honeypot: false });
+const aveDiscovery = at => ({ ...discovery(at), marketProvider: 'AVE', price: 1, volume_5m: 1000,
+  launch_at: Math.floor(at / 1000) - 600, capturedAt: at, sourceUpdatedAt: at, expiresAt: at + 30000 });
 
 test('observed early pump and collapse are rejected even when the last five bars look normal', () => {
   for (const [bars, code] of [[pump(now), 'VERTICAL_PLATEAU'], [dump(now), 'SUSTAINED_COLLAPSE']]) {
@@ -70,9 +72,10 @@ test('both discovery paths filter known low LP, high taxes, DEV and explicit zer
     const row = { ...discovery(now), ...fields };
     assert.ok(knownRiskReasons(row, config).length);
     assert.equal(discoveryScreen(row, { ...config, chain: 'bsc' }, now / 1000).pass, false);
-    assert.equal(normalizeLiveRows([row], 'bsc', [], now).length, 0);
+    const liveFields = fields.liquidity ? { liquidity: config.minLiquidity - 1 } : fields;
+    assert.equal(normalizeLiveRows([{ ...aveDiscovery(now), ...liveFields }], 'bsc', [], now).length, 0);
   }
-  assert.equal(normalizeLiveRows([{ ...discovery(now), volume: 0 }], 'bsc', [], now).length, 1);
+  assert.equal(normalizeLiveRows([{ ...aveDiscovery(now), volume: 0 }], 'bsc', [], now).length, 1);
 });
 
 test('risk memory survives restart, old snapshots and chain switching without another deep audit', async t => {
@@ -80,9 +83,9 @@ test('risk memory survives restart, old snapshots and chain switching without an
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   let state = new RadarState(dir), audits = 0;
   state.value.activeChain = 'bsc';
-  const gmgn = { keyEpoch: 1, configured: async () => true, discover: async () => [discovery(Date.now())],
+  const provider = { keyEpoch: 1, configured: async () => true, discover: async () => [aveDiscovery(Date.now())],
     audit: async () => { audits++; return { candles: pump(Date.now()) }; } };
-  let scanner = new Scanner({ state, gmgn, settings: { ...config, chain: 'bsc', outcomeReadsPerCycle: 1 } });
+  let scanner = new Scanner({ state, provider, settings: { ...config, chain: 'bsc', outcomeReadsPerCycle: 1, maxDeepAuditsPerCycle: 1 } });
   await scanner.cycle();
   assert.equal(audits, 1);
   const key = 'bsc:' + address, hold = state.value.riskExclusions[key];
@@ -94,7 +97,7 @@ test('risk memory survives restart, old snapshots and chain switching without an
   state.save(); state = new RadarState(dir);
   assert.equal(toPublicStatus(state.value).candidates[0].status, 'HARD_REJECT');
   assert.equal(voiceSnapshot(state.value, ['bsc']).chains.bsc[0].qualified, false);
-  scanner = new Scanner({ state, gmgn, settings: { ...config, chain: 'bsc' } });
+  scanner = new Scanner({ state, provider, settings: { ...config, chain: 'bsc' } });
   await scanner.cycle(); assert.equal(audits, 1);
   assert.equal(state.value.candidates[0].status, 'HARD_REJECT');
   scanner.activateChain('arc', true); scanner.activateChain('bsc', true);

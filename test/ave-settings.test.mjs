@@ -22,17 +22,18 @@ function fixture(legacy) {
   return { directory, settings, calls, pauses, fetchImpl, next(value = {}) { clock += 61000; replies = value; },
     close() { rmSync(directory, { recursive: true, force: true }); } };
 }
-test('one AVE key reaches both fixed read-only endpoints; never becomes execution-ready', async () => {
+test('one AVE key reaches only the fixed Data GET; never becomes execution-ready', async () => {
   const f = fixture();
   try {
     const state = await f.settings.configure({ key: 'one-fixture-key' });
-    assert.equal(state.configured, true); assert.equal(state.data.status, 'connected'); assert.equal(state.trade.status, 'connected');
+    assert.equal(state.configured, true); assert.equal(state.data.status, 'connected'); assert.equal(state.trade.status, 'disabled');
     assert.equal(state.executionReady, false);
-    assert.deepEqual(f.calls.map(c => c.url), [AVE_CHECKS.data.url, AVE_CHECKS.trade.url]);
-    assert.deepEqual(f.pauses, [1100]);
+    assert.deepEqual(f.calls.map(c => c.url), [AVE_CHECKS.data.url]);
+    assert.deepEqual(Object.keys(AVE_CHECKS), ['data']);
+    assert.deepEqual(f.pauses, []);
     for (const call of f.calls) { assert.equal(call.options.method, 'GET'); assert.equal(call.options.body, undefined); assert.equal(call.options.redirect, 'error'); }
     assert.equal(f.calls[0].options.headers['X-API-KEY'], 'one-fixture-key');
-    assert.equal(f.calls[1].options.headers['AVE-ACCESS-KEY'], 'one-fixture-key');
+    assert.equal(f.settings.getKey(), 'one-fixture-key');
     assert.doesNotMatch(JSON.stringify(state), /one-fixture-key|privateKey/);
     const file = join(f.directory, 'ave-credentials.json');
     assert.equal(statSync(file).mode & 0o777, 0o600);
@@ -41,17 +42,18 @@ test('one AVE key reaches both fixed read-only endpoints; never becomes executio
     assert.equal(reboot.snapshot().configured, true); assert.equal(reboot.snapshot().data.status, 'untested');
   } finally { f.close(); }
 });
-test('partial access saves one key and keeps capability failure explicit', async () => {
+test('trade access cannot rescue failed Data verification or replace a saved key', async () => {
   const f = fixture();
   try {
     f.next({ trade: [{ error: 'fixture-secret' }, 403] });
     const state = await f.settings.configure({ key: 'partial-fixture' });
     assert.equal(state.configured, true); assert.equal(state.data.status, 'connected');
-    assert.equal(state.trade.status, 'error'); assert.equal(state.trade.code, 'AVE_AUTH'); assert.equal(state.executionReady, false);
+    assert.equal(state.trade.status, 'disabled'); assert.equal(state.executionReady, false);
     f.next({ data: [{ status: 0 }, 200] });
-    const other = await f.settings.configure({ key: 'replacement-fixture' });
-    assert.equal(other.data.status, 'error'); assert.equal(other.trade.status, 'connected');
-    assert.equal(JSON.parse(readFileSync(join(f.directory, 'ave-credentials.json'))).key, 'replacement-fixture');
+    await assert.rejects(f.settings.configure({ key: 'replacement-fixture' }), { code: 'AVE_SCHEMA' });
+    assert.equal(f.calls.length, 2);
+    assert.equal(f.settings.snapshot().data.status, 'connected');
+    assert.equal(JSON.parse(readFileSync(join(f.directory, 'ave-credentials.json'))).key, 'partial-fixture');
   } finally { f.close(); }
 });
 test('failed replacements preserve saved key; retest uses saved key; removal clears both capabilities', async () => {
@@ -67,17 +69,16 @@ test('failed replacements preserve saved key; retest uses saved key; removal cle
       assert.equal(f.settings.snapshot().data.status, 'connected'); // old key, not failed replacement
     }
     f.next({ data: [{}, 401], trade: [{}, 401] });
-    await assert.rejects(f.settings.configure({ key: '' }), { code: 'AVE_CHECK_FAILED' });
-    assert.equal(f.settings.snapshot().data.status, 'error'); assert.equal(f.settings.snapshot().trade.status, 'error');
+    await assert.rejects(f.settings.configure({ key: '' }), { code: 'AVE_AUTH' });
+    assert.equal(f.settings.snapshot().data.status, 'error'); assert.equal(f.settings.snapshot().trade.status, 'disabled');
     f.next(); await f.settings.configure({ key: '' });
-    assert.equal(f.calls.at(-2).options.headers['X-API-KEY'], 'original-fixture');
-    assert.equal(f.calls.at(-1).options.headers['AVE-ACCESS-KEY'], 'original-fixture');
+    assert.equal(f.calls.at(-1).options.headers['X-API-KEY'], 'original-fixture');
     f.settings.remove({});
     assert.equal(f.settings.snapshot().configured, false); assert.equal(f.settings.snapshot().trade.configured, false);
     assert.doesNotMatch(readFileSync(file, 'utf8'), /original-fixture/);
   } finally { f.close(); }
 });
-test('rate limit stops second request and enforces cooldown without automatic retries', async () => {
+test('rate limit enforces cooldown without automatic retries or trade requests', async () => {
   const f = fixture();
   try {
     f.next({ data: [{}, 429] });
@@ -86,7 +87,7 @@ test('rate limit stops second request and enforces cooldown without automatic re
     await assert.rejects(f.settings.configure({ key: 'limited-fixture' }), { code: 'AVE_COOLDOWN' });
     f.next({ trade: [{}, 429] });
     const state = await f.settings.configure({ key: 'limited-fixture' });
-    assert.equal(state.data.status, 'connected'); assert.equal(state.trade.code, 'AVE_RATE_LIMIT');
+    assert.equal(state.data.status, 'connected'); assert.equal(state.trade.status, 'disabled');
     await assert.rejects(f.settings.configure({ key: '' }), { code: 'AVE_COOLDOWN' });
   } finally { f.close(); }
 });
@@ -99,7 +100,7 @@ test('legacy one-sided/identical keys migrate safely; conflicting keys require r
       await f.settings.configure({});
       assert.equal(JSON.parse(readFileSync(file)).schema, 2);
       assert.equal(f.calls[0].options.headers['X-API-KEY'], 'legacy-fixture');
-      assert.equal(f.calls[1].options.headers['AVE-ACCESS-KEY'], 'legacy-fixture');
+      assert.equal(f.calls.length, 1);
     } finally { f.close(); }
   }
   const f = fixture({ schema: 1, keys: { data: 'old-data-fixture', trade: 'old-trade-fixture' } });
@@ -124,11 +125,125 @@ test('old split format, extra fields, header injection, revoked authority and co
     const file = join(f.directory, 'ave-credentials.json'), saved = readFileSync(file, 'utf8');
     f.next();
     let checks = 0;
-    await assert.rejects(f.settings.configure({ key: 'replacement-fixture' }, () => { if (++checks === 4) throw new Error('revoked'); }));
+    await assert.rejects(f.settings.configure({ key: 'replacement-fixture' }, () => { if (++checks === 3) throw new Error('revoked'); }));
     assert.equal(readFileSync(file, 'utf8'), saved);
     assert.throws(() => f.settings.remove({ kind: 'data' }));
     writeFileSync(file, '{broken');
     assert.throws(() => createAveSettings({ directory: f.directory }), /原文件保留/);
     assert.equal(readFileSync(file, 'utf8'), '{broken');
   } finally { f.close(); }
+});
+
+const VERIFY_AT = Date.UTC(2026, 8, 30, 12);
+const ORIGINAL_KEY = 'original-synthetic-verification-key';
+const CANDIDATE_KEY = 'candidate-synthetic-verification-secret';
+function sharedVerificationFixture(verifyData, options = {}) {
+  const directory = mkdtempSync(join(tmpdir(), 'radar-ave-verify-'));
+  const file = join(directory, 'ave-credentials.json');
+  writeFileSync(file, JSON.stringify({ schema: 2, key: ORIGINAL_KEY }));
+  const saved = readFileSync(file, 'utf8'), changes = [];
+  const settings = createAveSettings({ directory, now: () => VERIFY_AT, verifyData,
+    onChange: value => changes.push(value), ...options });
+  return { settings, changes, assertRetained() {
+    assert.equal(settings.getKey(), ORIGINAL_KEY);
+    assert.equal(readFileSync(file, 'utf8'), saved);
+    assert.equal(changes.length, 0);
+  }, close() { rmSync(directory, { recursive: true, force: true }); } };
+}
+
+test('shared-client verification preserves typed wait, budget and service errors without exposing upstream text', async () => {
+  const mappings = [
+    ['AVE_HOURLY_BUDGET', 429], ['AVE_TOTAL_BUDGET', 429], ['AVE_DISCOVERY_RESERVE', 429], ['AVE_WAIT', 429],
+    ['AVE_NETWORK', 502], ['AVE_UPSTREAM', 502], ['AVE_AUTH', 400], ['AVE_BUDGET', 429], ['AVE_QUOTA', 429],
+    ['AVE_RATE_LIMITED', 429, 'AVE_RATE_LIMIT'], ['AVE_BUDGET_STORE', 503, 'AVE_STORAGE']
+  ];
+  for (const [code, status, mapped = code] of mappings) {
+    const retryAt = VERIFY_AT + 7200000;
+    const f = sharedVerificationFixture(async () => { throw Object.assign(new Error('upstream ' + CANDIDATE_KEY), { code, retryAt }); });
+    try {
+      await assert.rejects(f.settings.configure({ key: CANDIDATE_KEY }), error => {
+        assert.equal(error.code, mapped); assert.equal(error.status, status); assert.equal(error.retryAt, retryAt);
+        assert.doesNotMatch(error.message + JSON.stringify(error), /synthetic|upstream/);
+        return true;
+      });
+      f.assertRetained();
+      assert.equal(f.settings.snapshot().data.status, 'untested', 'a failed replacement must not invalidate the old key');
+      assert.doesNotMatch(JSON.stringify(f.settings.snapshot()), /synthetic/);
+      if (['AVE_HOURLY_BUDGET', 'AVE_DISCOVERY_RESERVE', 'AVE_WAIT', 'AVE_BUDGET', 'AVE_QUOTA', 'AVE_RATE_LIMITED'].includes(code)) {
+        await assert.rejects(f.settings.configure({ key: CANDIDATE_KEY }), error => error.code === 'AVE_COOLDOWN' && error.retryAt === retryAt);
+      }
+    } finally { f.close(); }
+  }
+});
+
+test('verification retry timestamps reject invalid, stale and implausibly distant values', async () => {
+  for (const retryAt of [undefined, -1, 0, NaN, Infinity, VERIFY_AT, VERIFY_AT - 1,
+    VERIFY_AT + 0.5, String(VERIFY_AT + 300000), VERIFY_AT + 367 * 86400000]) {
+    const f = sharedVerificationFixture(async () => { throw Object.assign(new Error(CANDIDATE_KEY), { code: 'AVE_WAIT', retryAt }); });
+    try {
+      await assert.rejects(f.settings.configure({ key: CANDIDATE_KEY }), error => error.code === 'AVE_WAIT' && !Object.hasOwn(error, 'retryAt'));
+      f.assertRetained();
+    } finally { f.close(); }
+  }
+});
+
+test('unknown shared-client failures expose only a safe diagnostic code and preserve the saved key', async () => {
+  const f = sharedVerificationFixture(async () => { throw Object.assign(new Error('https://provider.invalid/?key=' + CANDIDATE_KEY),
+    { code: 'CUSTOM_' + CANDIDATE_KEY, status: 401 }); });
+  try {
+    await assert.rejects(f.settings.configure({ key: CANDIDATE_KEY }), error => {
+      assert.equal(error.code, 'AVE_CONNECT'); assert.equal(error.status, 502);
+      assert.doesNotMatch(error.message + JSON.stringify(error), /synthetic|provider|CUSTOM_/);
+      return true;
+    });
+    f.assertRetained();
+  } finally { f.close(); }
+});
+
+test('caller cancellation prevents a late successful verifier from replacing the saved key', async () => {
+  let release, started, receivedSignal;
+  const ready = new Promise(resolve => { started = resolve; });
+  const controller = new AbortController();
+  const f = sharedVerificationFixture((_key, { signal }) => {
+    receivedSignal = signal; started(); return new Promise(resolve => { release = resolve; });
+  });
+  try {
+    const request = f.settings.configure({ key: CANDIDATE_KEY }, () => {}, { signal: controller.signal });
+    await ready; controller.abort();
+    await assert.rejects(request, { code: 'AVE_ABORTED' });
+    assert.equal(receivedSignal.aborted, true); f.assertRetained();
+    release({ connected: true }); await new Promise(resolve => setImmediate(resolve));
+    f.assertRetained();
+  } finally { f.close(); }
+});
+
+test('bounded verification deadline retains the old key even if the verifier ignores abort and succeeds later', async () => {
+  let release, receivedSignal;
+  const keepAlive = setInterval(() => {}, 1000);
+  const f = sharedVerificationFixture((_key, { signal }) => {
+    receivedSignal = signal; return new Promise(resolve => { release = resolve; });
+  }, { verificationTimeoutMs: 15 });
+  try {
+    await assert.rejects(f.settings.configure({ key: CANDIDATE_KEY }), { code: 'AVE_TIMEOUT', status: 504 });
+    assert.equal(receivedSignal.aborted, true); f.assertRetained();
+    release({ connected: true }); await new Promise(resolve => setImmediate(resolve));
+    f.assertRetained();
+  } finally { clearInterval(keepAlive); f.close(); }
+});
+
+test('deferred saved-key retests retain credentials and show waiting with the actual budget or cooldown reason', async () => {
+  for (const code of ['AVE_WAIT', 'AVE_BUSY', 'AVE_RATE_LIMITED', 'AVE_QUOTA', 'AVE_BUDGET',
+    'AVE_HOURLY_BUDGET', 'AVE_TOTAL_BUDGET', 'AVE_DISCOVERY_RESERVE']) {
+    const f = sharedVerificationFixture(async () => { throw Object.assign(new Error(CANDIDATE_KEY),
+      { code, retryAt: VERIFY_AT + 3600000 }); });
+    const mapped = code === 'AVE_RATE_LIMITED' ? 'AVE_RATE_LIMIT' : code;
+    try {
+      await assert.rejects(f.settings.configure({ key: '' }), { code: mapped });
+      assert.equal(f.settings.snapshot().data.status, 'waiting');
+      assert.equal(f.settings.snapshot().data.code, mapped);
+      assert.equal(f.settings.snapshot().data.retryAt, VERIFY_AT + 3600000);
+      assert.doesNotMatch(JSON.stringify(f.settings.snapshot()), /synthetic/);
+      f.assertRetained();
+    } finally { f.close(); }
+  }
 });

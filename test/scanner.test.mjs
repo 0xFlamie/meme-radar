@@ -5,6 +5,11 @@ import {
   twitterHandle, updateOutcomeTracking, upsertOutcome
 } from '../src/scanner.mjs';
 
+const marketQuote = (address, price, at, chain = 'bsc') => ({
+  address, chain, marketProvider: 'AVE', price, capturedAt: at,
+  sourceUpdatedAt: at, expiresAt: at + 30_000, stale: false
+});
+
 test('manual rescan requests run immediately or queue behind the active cycle', async () => {
   const scanner = Object.create(Scanner.prototype);
   scanner.running = true;
@@ -111,23 +116,23 @@ test('secondary safety is a one-vote veto while unsupported coverage remains man
 test('shadow outcomes sample each requested horizon on time without late backfill', () => {
   const day = 24 * 60 * 60_000;
   const baselineAt = 1_800_000_000_000;
-  let outcomes = [{ address: 'token', baselineAt, baselinePrice: 100, initialDecision: 'X_REVIEW', samples: {} }];
+  let outcomes = [{ address: 'token', baselineProvider: 'AVE', baselineAt, baselinePrice: 100, initialDecision: 'X_REVIEW', samples: {} }];
 
-  outcomes = updateOutcomeTracking(outcomes, new Map([['token', { price: 110 }]]), baselineAt + 31 * 60_000, 7 * day);
+  outcomes = updateOutcomeTracking(outcomes, new Map([['token', marketQuote('token', 110, baselineAt + 31 * 60_000)]]), baselineAt + 31 * 60_000, 7 * day);
   assert.ok(Math.abs(outcomes[0].samples.m30.return - .10) < 1e-12);
   assert.equal(outcomes[0].samples.h2, undefined);
 
-  outcomes = updateOutcomeTracking(outcomes, new Map([['token', { price: 90 }]]), baselineAt + 2 * 60 * 60_000 + 2 * 60_000, 7 * day);
+  outcomes = updateOutcomeTracking(outcomes, new Map([['token', marketQuote('token', 90, baselineAt + 2 * 60 * 60_000 + 2 * 60_000)]]), baselineAt + 2 * 60 * 60_000 + 2 * 60_000, 7 * day);
   assert.ok(Math.abs(outcomes[0].samples.h2.return + .10) < 1e-12);
   assert.ok(Math.abs(outcomes[0].samples.m30.return - .10) < 1e-12);
 
-  outcomes = updateOutcomeTracking(outcomes, new Map([['token', { price: 130 }]]), baselineAt + day + 3 * 60_000, 7 * day);
+  outcomes = updateOutcomeTracking(outcomes, new Map([['token', marketQuote('token', 130, baselineAt + day + 3 * 60_000)]]), baselineAt + day + 3 * 60_000, 7 * day);
   assert.ok(Math.abs(outcomes[0].samples.h24.return - .30) < 1e-12);
   assert.ok(Math.abs(outcomes[0].samples.h2.return + .10) < 1e-12);
 
   const lateOnly = updateOutcomeTracking(
-    [{ address: 'late', baselineAt, baselinePrice: 100, initialDecision: 'X_REVIEW', samples: {} }],
-    new Map([['late', { price: 125 }]]), baselineAt + day, 7 * day
+    [{ address: 'late', baselineProvider: 'AVE', baselineAt, baselinePrice: 100, initialDecision: 'X_REVIEW', samples: {} }],
+    new Map([['late', marketQuote('late', 125, baselineAt + day)]]), baselineAt + day, 7 * day
   )[0];
   assert.equal(lateOnly.samples.m30, undefined);
   assert.equal(lateOnly.samples.h2, undefined);
@@ -136,7 +141,7 @@ test('shadow outcomes sample each requested horizon on time without late backfil
 
 test('only X_REVIEW creates a shadow cohort while later decisions still update its audit trail', () => {
   const now = 1_800_000_000_000;
-  const base = { address: 'token', chain: 'sol', symbol: 'DOG', price: 1, auditedAt: now, deep: { failed: [] } };
+  const base = { address: 'token', chain: 'sol', marketProvider: 'AVE', symbol: 'DOG', price: 1, auditedAt: now, deep: { failed: [] } };
   const outcomes = [];
   upsertOutcome(outcomes, { ...base, status: 'WAIT_RECHECK' }, now);
   upsertOutcome(outcomes, { ...base, address: 'rejected', status: 'HARD_REJECT' }, now);
@@ -174,13 +179,13 @@ test('Solana outcome matching preserves base58 address case while EVM keys remai
   const now = 1_800_000_000_000;
   const sol = 'So11111111111111111111111111111111111111112';
   const lowerSol = sol.replace(/^S/, 's');
-  const solOutcome = [{ address: sol, baselineAt: now, baselinePrice: 1, initialDecision: 'X_REVIEW', samples: {} }];
-  const exact = updateOutcomeTracking(solOutcome, new Map([[sol, { price: 2 }], [lowerSol, { price: 99 }]]), now + 30 * 60_000, 7 * 24 * 60 * 60_000)[0];
+  const solOutcome = [{ address: sol, baselineProvider: 'AVE', baselineAt: now, baselinePrice: 1, initialDecision: 'X_REVIEW', samples: {} }];
+  const exact = updateOutcomeTracking(solOutcome, new Map([[sol, marketQuote(sol, 2, now + 30 * 60_000, 'sol')], [lowerSol, marketQuote(lowerSol, 99, now + 30 * 60_000, 'sol')]]), now + 30 * 60_000, 7 * 24 * 60 * 60_000)[0];
   assert.equal(exact.samples.m30.return, 1);
 
   const evm = '0xAa00000000000000000000000000000000000000';
-  const evmOutcome = [{ address: evm, baselineAt: now, baselinePrice: 1, initialDecision: 'X_REVIEW', samples: {} }];
+  const evmOutcome = [{ address: evm, baselineProvider: 'AVE', baselineAt: now, baselinePrice: 1, initialDecision: 'X_REVIEW', samples: {} }];
   const evmKey = evm.toLowerCase();
-  const matched = updateOutcomeTracking(evmOutcome, new Map([[evmKey, { price: 1.5 }]]), now + 30 * 60_000, 7 * 24 * 60 * 60_000)[0];
+  const matched = updateOutcomeTracking(evmOutcome, new Map([[evmKey, marketQuote(evmKey, 1.5, now + 30 * 60_000)]]), now + 30 * 60_000, 7 * 24 * 60 * 60_000)[0];
   assert.equal(matched.samples.m30.return, .5);
 });

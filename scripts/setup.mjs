@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { randomUUID } from 'node:crypto';
 
 export const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -14,69 +14,127 @@ export function supportedNode(version) {
 export async function dependenciesReady(root = projectRoot) {
   try {
     const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-    const installed = JSON.parse(fs.readFileSync(path.join(root, 'node_modules', 'gmgn-cli', 'package.json'), 'utf8'));
-    if (installed.version !== manifest.dependencies['gmgn-cli']) return false;
-    await import(pathToFileURL(path.join(root, 'node_modules/gmgn-cli/dist/client/OpenApiClient.js')).href);
-    await import(pathToFileURL(path.join(root, 'node_modules/gmgn-cli/dist/output.js')).href);
-    return true;
+    const lock = JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8'));
+    const noDependencies = value => ['dependencies', 'optionalDependencies', 'devDependencies']
+      .every(field => value?.[field] === undefined || value[field] && typeof value[field] === 'object'
+        && !Array.isArray(value[field]) && Object.keys(value[field]).length === 0);
+    return manifest.name === 'meme-radar-open-source' && noDependencies(manifest)
+      && lock.name === manifest.name && lock.version === manifest.version
+      && lock.packages && Object.keys(lock.packages).length === 1
+      && lock.packages['']?.version === manifest.version && noDependencies(lock.packages['']);
   } catch { return false; }
 }
 
-function npmEntry() {
-  const bin = path.dirname(process.execPath);
-  const candidates = [
-    path.resolve(bin, '../lib/node_modules/npm/bin/npm-cli.js'),
-    path.join(bin, 'node_modules/npm/bin/npm-cli.js'), process.env.npm_execpath
-  ];
-  const found = candidates.find(value => value && value.endsWith('npm-cli.js') && fs.existsSync(value));
-  if (!found) throw new Error('此 Node 安装缺少 npm，请运行“安装并启动.command”或安装包含 npm 的 Node.js。');
-  return found;
-}
+const sameFile = (left, right) => left.dev === right.dev && left.ino === right.ino;
 
-function alive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
-}
-
-export async function withLocalLock(name, callback) {
-  const runtime = path.join(projectRoot, '.runtime');
-  fs.mkdirSync(runtime, { recursive: true, mode: 0o700 });
-  const lock = path.join(runtime, `${name}.lock`);
-  const ownerFile = path.join(lock, 'pid');
-  for (let attempt = 0; attempt < 400; attempt++) {
-    try { fs.mkdirSync(lock); fs.writeFileSync(ownerFile, String(process.pid), { mode: 0o600 }); }
-    catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      try {
-        const owner = Number(fs.readFileSync(ownerFile, 'utf8'));
-        if (!alive(owner)) { fs.unlinkSync(ownerFile); fs.rmdirSync(lock); continue; }
-      } catch (error) { if (!['ENOENT', 'ENOTEMPTY'].includes(error.code)) throw error; }
-      await delay(300);
-      continue;
+export async function withLocalLock(name, callback, { root = projectRoot, fsImpl = fs,
+  pid = process.pid, kill = process.kill, pause = delay, attempts = 400 } = {}) {
+  if (!/^[a-zA-Z0-9_-]{1,80}$/.test(name) || !Number.isSafeInteger(pid) || pid <= 0) throw new Error('启动锁参数无效。');
+  const runtime = path.join(root, '.runtime'), lock = path.join(runtime, `${name}.lock`);
+  const recovery = `${lock}.recovery`, temporary = path.join(runtime, `.lock-owner-${randomUUID()}.tmp`);
+  const failure = (code, target = lock) => Object.assign(new Error(
+    `启动锁无法安全确认：本项目 .runtime/${path.basename(target)}。请关闭本项目所有启动窗口并确认没有相关进程；保留该锁并联系维护者检查，不要删除整个 .runtime。`), { code });
+  const alive = owner => {
+    try { kill(owner, 0); return true; }
+    catch (error) { return error.code !== 'ESRCH'; } // Permission/unknown errors never prove a dead owner.
+  };
+  const inspect = target => {
+    let stat;
+    try { stat = fsImpl.lstatSync(target); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    if (stat.isSymbolicLink() || !stat.isFile() && !stat.isDirectory()) throw failure('RADAR_LOCK_UNSAFE', target);
+    const directory = stat.isDirectory(), ownerFile = directory ? path.join(target, 'pid') : target;
+    if (directory && fsImpl.readdirSync(target).some(entry => entry !== 'pid')) throw failure('RADAR_LOCK_UNSAFE', target);
+    let ownerStat, fd;
+    try {
+      ownerStat = fsImpl.lstatSync(ownerFile);
+      if (!ownerStat.isFile() || ownerStat.isSymbolicLink() || ownerStat.size > 64 || ownerStat.nlink > (directory ? 1 : 2)) {
+        throw failure('RADAR_LOCK_UNSAFE', target);
+      }
+      fd = fsImpl.openSync(ownerFile, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+      if (!sameFile(ownerStat, fsImpl.fstatSync(fd))) throw failure('RADAR_LOCK_CHANGED', target);
+      const text = fsImpl.readFileSync(fd, 'utf8').trim(), owner = Number(text);
+      if (!/^\d+$/.test(text) || !Number.isSafeInteger(owner) || owner <= 0) return { stat, directory, incomplete: true };
+      return { stat, directory, ownerStat, ownerFile, owner };
+    } catch (error) {
+      if (error.code === 'ENOENT') return { stat, directory, incomplete: true };
+      throw error;
+    } finally { if (fd !== undefined) fsImpl.closeSync(fd); }
+  };
+  const unlinkOwned = (target, expected) => {
+    let current;
+    try { current = fsImpl.lstatSync(target); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
+    if (!sameFile(current, expected) || !current.isFile() || current.isSymbolicLink()) throw failure('RADAR_LOCK_CHANGED', target);
+    fsImpl.unlinkSync(target);
+  };
+  fsImpl.mkdirSync(runtime, { recursive: true, mode: 0o700 });
+  const runtimeStat = fsImpl.lstatSync(runtime);
+  if (!runtimeStat.isDirectory() || runtimeStat.isSymbolicLink()) throw failure('RADAR_LOCK_UNSAFE');
+  let prepared, fd, ownsTemporary = false, callbackFailure;
+  try {
+    // A complete, flushed owner becomes visible atomically. A crash before
+    // link leaves only an unrelated temp file, never an ownerless held lock.
+    fd = fsImpl.openSync(temporary, 'wx', 0o600); ownsTemporary = true;
+    fsImpl.writeFileSync(fd, `${pid}\n`); fsImpl.fsyncSync(fd); prepared = fsImpl.fstatSync(fd);
+    fsImpl.closeSync(fd); fd = undefined;
+    let incompleteWaits = 0;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      let acquired = false;
+      try { fsImpl.linkSync(temporary, lock); acquired = true; }
+      catch (error) { if (error.code !== 'EEXIST') throw error; }
+      if (acquired) {
+        try {
+          unlinkOwned(temporary, prepared); ownsTemporary = false;
+          try { return await callback(); } catch (error) { callbackFailure = { error }; throw error; }
+        }
+        finally { unlinkOwned(lock, prepared); }
+      }
+      const previous = inspect(lock);
+      if (!previous) continue;
+      if (previous.incomplete) {
+        // Legacy mkdir+pid acquisition could be in progress. Give it a short
+        // grace period; absence/age alone cannot prove that its creator died.
+        if (++incompleteWaits >= 10) throw failure('RADAR_LOCK_ORPHAN');
+      } else if (!alive(previous.owner)) {
+        // Only one reaper may remove a confirmed-dead owner. Without this
+        // guard, two reapers could delete a newly acquired replacement lock.
+        let reaping = false;
+        try { fsImpl.linkSync(temporary, recovery); reaping = true; }
+        catch (error) {
+          if (error.code !== 'EEXIST') throw error;
+          const guard = inspect(recovery);
+          if (guard && (guard.incomplete || !alive(guard.owner))) throw failure('RADAR_LOCK_RECOVERY', recovery);
+        }
+        if (reaping) {
+          try {
+            const current = inspect(lock);
+            if (current && sameFile(current.stat, previous.stat) && !current.incomplete && !alive(current.owner)) {
+              unlinkOwned(current.ownerFile, current.ownerStat);
+              if (current.directory) fsImpl.rmdirSync(lock);
+            }
+          } finally { unlinkOwned(recovery, prepared); }
+          continue;
+        }
+      }
+      await pause(300);
     }
-    try { return await callback(); }
-    finally { fs.unlinkSync(ownerFile); fs.rmdirSync(lock); }
+    throw Object.assign(new Error(`本项目 .runtime/${name}.lock 仍由活动进程持有，请等待启动完成后重试。`), { code: 'RADAR_LOCK_BUSY' });
+  } catch (error) {
+    if (callbackFailure && error === callbackFailure.error || error?.code?.startsWith('RADAR_LOCK_')) throw error;
+    throw failure('RADAR_LOCK_IO');
+  } finally {
+    if (fd !== undefined) fsImpl.closeSync(fd);
+    if (ownsTemporary) {
+      // Only the unique file created by this attempt is eligible for cleanup.
+      try { if (prepared) unlinkOwned(temporary, prepared); else fsImpl.unlinkSync(temporary); } catch { /* Never remove another path. */ }
+    }
   }
-  throw new Error('另一个安装或启动任务仍在进行，请等待完成后重试。');
 }
 
-export async function ensureDependencies({ checkOnly = false } = {}) {
+export async function ensureDependencies() {
   if (!supportedNode(process.versions.node)) throw new Error('需要 Node.js 22.23+ 或 24.5+，双击“安装并启动.command”可自动准备。');
-  if (await dependenciesReady()) return;
-  if (checkOnly) throw new Error('依赖尚未安装。运行 npm run setup 或双击“安装并启动.command”。');
-  await withLocalLock('dependencies', async () => {
-    if (await dependenciesReady()) return;
-    const npm = npmEntry();
-    console.log('首次运行：正在安装雷达组件，请稍候……');
-    const env = { ...process.env, PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH || ''}` };
-    for (const key of Object.keys(env)) if (key.startsWith('GMGN_')) delete env[key];
-    const result = await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [npm, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: projectRoot, env, stdio: 'inherit' });
-      child.once('error', reject);
-      child.once('exit', resolve);
-    });
-    if (result !== 0 || !await dependenciesReady()) throw new Error('组件安装未完成，请检查网络后重新运行安装入口。');
-  });
+  // The AVE-only application uses Node built-ins. Never install or load an old
+  // dependency tree merely because it remains beside a user's local history.
+  if (!await dependenciesReady()) throw new Error('发行文件不完整或依赖清单不一致，请重新解压完整的开源版。');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {

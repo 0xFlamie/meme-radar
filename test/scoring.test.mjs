@@ -16,6 +16,32 @@ const recentTraders = () => Array.from({ length: 5 }, (_, i) => ({
   address: `seller-${i}`, sell_tx_count_cur: 1, last_active_timestamp: nowSec - 60
 }));
 
+test('AVE known zero current-side counts veto a candidate while absent counts and legacy aliases stay unknown', () => {
+  const at = nowSec * 1_000, settings = { ...config, chain: 'bsc' };
+  const row = { address, chain: 'bsc', marketProvider: 'AVE', market_cap: 50_000, liquidity: 10_000,
+    price: 1, launch_at: nowSec - 900, volume_5m: 1_000, buy_volume_5m: null, sell_volume_5m: null,
+    capturedAt: at - 500, sourceUpdatedAt: at - 1_000, expiresAt: at + 20_000,
+    buys: 999, sells: 999, swaps: 1_998 };
+  for (const field of ['buys_5m', 'sells_5m']) {
+    for (const value of [0, '0']) {
+      const result = discoveryScreen({ ...row, [field]: value }, settings, nowSec);
+      assert.equal(result.pass, false);
+      assert.ok(result.reasons.includes(field === 'buys_5m' ? '近5分钟无买入成交' : '近5分钟无卖出成交'));
+    }
+    for (const value of [undefined, null, '', false, true, NaN, [], {}]) {
+      const result = discoveryScreen({ ...row, [field]: value }, settings, nowSec);
+      assert.equal(result.pass, true, 'unknown counts must not become known zero');
+      assert.equal(result.signals.buys5m, null);
+      assert.equal(result.signals.sells5m, null);
+      assert.equal(result.signals.swaps5m, null, 'legacy interval-free counts are not five-minute evidence');
+    }
+  }
+  for (const changes of [{ sourceUpdatedAt: at - 61_000 }, { capturedAt: at + 1 }, { expiresAt: at }, { stale: true }]) {
+    assert.equal(discoveryScreen({ ...row, buys_5m: 9, sells_5m: 6, ...changes }, settings, nowSec).pass, false,
+      'positive activity counts cannot renew stale or invalid market evidence');
+  }
+});
+
 test('discovery waits five minutes and prioritizes 20k-80k market cap', () => {
   const base = { address, market_cap: 50_000, liquidity: 10_000, creation_timestamp: nowSec - 301, rug_ratio: .1, bundler_rate: .1, rat_trader_amount_rate: .1, is_wash_trading: false, is_honeypot: 0 };
   const pass = discoveryScreen(base, config, nowSec);
@@ -36,9 +62,10 @@ test('discovery recognizes boolean variants and fails closed on malformed safety
 test('discovery validates Solana and EVM addresses according to chain', () => {
   const common = { market_cap: 50_000, liquidity: 10_000, creation_timestamp: nowSec - 600, rug_ratio: .1, bundler_rate: .1, rat_trader_amount_rate: .1, is_wash_trading: false };
   const solConfig = { ...config, chain: 'sol' };
-  assert.equal(discoveryScreen({ ...common, address: '11111111111111111111111111111111' }, solConfig, nowSec).pass, true);
+  const solAddress = 'So11111111111111111111111111111111111111112';
+  assert.equal(discoveryScreen({ ...common, address: solAddress }, solConfig, nowSec).pass, true);
   assert.match(discoveryScreen({ ...common, address }, solConfig, nowSec).reasons.join(' '), /地址格式异常/);
-  assert.match(discoveryScreen({ ...common, address: '11111111111111111111111111111111', is_honeypot: 0 }, config, nowSec).reasons.join(' '), /地址格式异常/);
+  assert.match(discoveryScreen({ ...common, address: solAddress, is_honeypot: 0 }, config, nowSec).reasons.join(' '), /地址格式异常/);
 });
 
 test('discovery ranking rewards multiple smart-money wallets but never rewards KOL-only interest', () => {
@@ -274,6 +301,13 @@ test('Solana deep screen uses mint and freeze renouncement instead of EVM owner 
   const unsafe = deepScreen({ discovery: {}, audit: { info: { liquidity: 10_000 }, security: { ...security, renounced_freeze_account: false }, pool: { liquidity: 10_000 }, holders, traders: [], candles: candles() }, nowMs: nowSec * 1000 }, solConfig);
   assert.equal(unsafe.checks.ownerRenounced, false);
   assert.ok(unsafe.failed.includes('ownerRenounced'));
+});
+
+test('explicit non-honeypot evidence does not invent a named provider or a complete audit', () => {
+  const result = deepScreen({ discovery: {}, audit: { security: { is_honeypot: false } } }, { ...config, chain: 'bsc' });
+  assert.equal(result.checks.notHoneypot, true);
+  assert.equal(result.honeypotEvidence, '安全证据明确非貔貅');
+  assert.equal(result.chainPass, false);
 });
 
 test('deep screen hard-fails unrenounced ownership and unlocked LP', () => {

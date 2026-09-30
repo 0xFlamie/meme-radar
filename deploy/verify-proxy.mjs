@@ -12,9 +12,12 @@ import { createServer } from '../src/server.mjs';
 const caddy = process.env.CADDY_BIN || 'caddy';
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'radar-proxy-'));
 const settings = { ...config, port: 0 };
-const state = { value: { status: 'GMGN_AUTH_REQUIRED', candidates: [] } };
+const state = { value: { status: 'AVE_AUTH_REQUIRED', candidates: [] } };
 let writes = 0;
+let aveWrites = 0;
+const aveSnapshot = () => ({ data: { configured: false, status: 'unconfigured' } });
 const server = createServer({ state, settings, supportedChains: ['sol'],
+  ave: { snapshot: aveSnapshot, configure: async () => { aveWrites++; return aveSnapshot(); } },
   switchChain: async () => { writes++; return { activeChain: 'sol' }; } });
 let proxy;
 let proxyError = '';
@@ -60,10 +63,16 @@ try {
   assert.equal((await request('/')).status, 200);
   assert.equal((await request('/voice-ui.mjs')).status, 200);
   assert.equal((await request('/api/status')).status, 200);
+  assert.equal((await request('/api/ave-status')).status, 200);
   const post = { method: 'POST', headers: { Origin: 'https://meme.polymeow.com',
     'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin' }, body: '{"chain":"sol"}' };
   assert.equal((await request('/api/active-chain', post)).status, 202);
   assert.equal(writes, 1);
+  const avePost = { ...post, body: '{"key":"isolated-test-not-real"}' };
+  assert.equal((await request('/api/ave-configure', avePost)).status, 200);
+  assert.equal((await request('/api/ave-configure', { ...avePost,
+    headers: { ...post.headers, Origin: 'https://evil.invalid' } })).status, 403);
+  assert.equal(aveWrites, 1);
   for (const origin of ['https://evil.invalid', 'https://pp.polymeow.com', 'null', 'http://meme.polymeow.com']) {
     assert.equal((await request('/api/active-chain', { ...post,
       headers: { ...post.headers, Origin: origin } })).status, 403);

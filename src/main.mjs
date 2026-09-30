@@ -1,45 +1,73 @@
 #!/usr/bin/env node
-import { config } from './config.mjs';
-import { GmgnClient } from './gmgn.mjs';
-import { GmgnKeyStore } from './gmgn-key-store.mjs';
+import { config, ROOT } from './config.mjs';
+import { readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { AveClient } from './ave.mjs';
 import { createAveSettings } from './ave-settings.mjs';
-import { GmgnConnection } from './gmgn-connection.mjs';
 import { RadarState } from './state.mjs';
 import { Scanner } from './scanner.mjs';
-import { SecondaryValidator } from './secondary.mjs';
+import { DexBatchMarketOverlay, SecondaryValidator } from './secondary.mjs';
 import { createServer, toPublicStatus } from './server.mjs';
 import { RadarControls } from './local-store.mjs';
 import { LiveDiscovery } from './live-discovery.mjs';
 import { configureWindowsSystemProxy } from './windows-proxy.mjs';
 
+// Windows portable supervisor bridge: keep the packaged EXE launcher intact.
+const once = process.argv.includes('--once');
+if (process.platform === 'win32' && !once && process.env.RADAR_SUPERVISED !== '1'
+  && resolve(process.execPath).toLowerCase() === resolve(ROOT, 'runtime', 'node.exe').toLowerCase()) {
+  try {
+    const { superviseRadar } = await import('../scripts/supervise.mjs');
+    await superviseRadar();
+    process.exit(0);
+  } catch (error) {
+    console.error('守护启动未完成：' + error.message);
+    process.exit(1);
+  }
+}
+
 // Browsers use the Windows system proxy automatically, while Node normally
 // only sees proxy environment variables. Mirror the effective Windows proxy
-// before any GMGN worker is launched so the portable build follows the same
+// before AVE reads begin so the portable build follows the same
 // network route as the user's browser.
 const proxy = configureWindowsSystemProxy();
 if (process.platform === 'win32') {
   console.log(proxy.proxy ? '已接入 Windows 系统网络代理。' : '未检测到 Windows 系统代理，将使用直连网络。');
 }
 
-const once = process.argv.includes('--once');
 const state = new RadarState(config.stateDir);
-const keyStore = new GmgnKeyStore(config.stateDir);
-let ave;
-try { ave = createAveSettings({ directory: config.stateDir }); }
-catch { console.error('AVE 本机配置无法读取；原文件保留，GMGN 扫描不受影响。'); }
-// Community installations must be explicit: never inherit an API key from the
-// user's shell or a pre-existing global GMGN CLI configuration.
-const gmgn = new GmgnClient({
-  apiKeyProvider: () => keyStore.get(),
-  privateKeyProvider: () => keyStore.verificationPrivateKey(),
-  legacyKeyProvider: () => ''
+let scanner;
+// Production discovery deliberately performs one hot-list read per turn. The
+// current AVE head response already carries the card fields; pagination and
+// automatic per-token completion must not amplify a shared-key rate limit.
+const sharedRequestIntervalMs = 5 * 60_000;
+const market = new AveClient({ directory: config.stateDir, apiKeyProvider: () => ave.getKey(), enrichLimit: 0,
+  maxTrendingPages: 1, rotateTrendingPages: true, minimumGapMs: sharedRequestIntervalMs });
+const ave = createAveSettings({ directory: config.stateDir,
+  verifyData: (key, options) => market.verifyApiKey(key, options),
+  onChange: () => { market.resetCredentials(); scanner?.requestCycle(); }
 });
-if (keyStore.disconnected()) gmgn.resetCredentials({ disabled: true });
-gmgn.nextAllowedAt = Math.max(0, Number(state.value.retryAt) || 0);
+// Keep old history and credentials on disk, but never reuse a previous
+// provider's pass or an unlabelled baseline as current AVE evidence.
+if (state.value.scanProvider !== 'AVE') {
+  for (const scope of [state.value, ...Object.values(state.value.chainStates || {})]) {
+    for (const row of scope.outcomes || []) row.baselineProvider ||= 'LEGACY_UNKNOWN';
+    for (const row of scope.candidates || []) {
+      row.marketProvider ||= 'LEGACY_UNKNOWN';
+      if (row.status === 'X_REVIEW') {
+        row.status = 'WAIT_RECHECK'; row.staleAt = 0;
+        row.deep = { ...row.deep, chainPass: false };
+        row.decisionReason = '已切换 AVE，等待新来源核验';
+      }
+    }
+    scope.sourceHealth = {}; scope.retryAt = 0;
+  }
+  state.value.scanProvider = 'AVE'; state.save();
+}
 const controls = new RadarControls(config.stateDir, config.supportedChains, state.value.activeChain || config.chain);
-const scanner = new Scanner({ gmgn, secondary: new SecondaryValidator(), state, controls });
-const connection = new GmgnConnection({ gmgn, keyStore, scanner });
-const liveDiscovery = new LiveDiscovery({ gmgn });
+scanner = new Scanner({ provider: market, secondary: new SecondaryValidator(), state, controls, sharedRequestIntervalMs });
+const liveDiscovery = new LiveDiscovery({ provider: market, cacheOnly: true, marketOverlay: new DexBatchMarketOverlay() });
+const version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
 
 if (once) {
   await scanner.cycle();
@@ -53,13 +81,12 @@ const server = createServer({
   controls,
   liveDiscovery,
   enqueueReview: (chain, row) => scanner.enqueueReview(chain, row),
-  settings: config,
+  settings: { ...config, version },
   supportedChains: config.supportedChains,
   switchChain: chain => scanner.switchChain(chain),
-  saveGmgnKey: apiKey => connection.apply(apiKey),
-  disconnectGmgnKey: () => connection.disconnect(),
-  getGmgnOnboarding: options => keyStore.onboarding(options),
-  getGmgnConnection: () => connection.snapshot()
+  getAveConnection: () => ave.snapshot(),
+  getSchedulerStatus: chain => scanner.scheduleSnapshot(chain),
+  getMarketStatus: () => market.snapshot()
 });
 server.requestTimeout = 10_000;
 server.headersTimeout = 12_000;
@@ -72,11 +99,13 @@ await new Promise((resolve, reject) => {
 });
 console.log(`Meme雷达：http://127.0.0.1:${config.port}`);
 console.log('只读扫描器：交易执行永久关闭');
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => {
-    scanner.stop();
-    liveDiscovery.stop();
-    server.close(() => process.exit(0));
-  });
+let closing = false;
+function shutdown() {
+  if (closing) return;
+  closing = true; scanner.stop(); liveDiscovery.stop();
+  market.resetCredentials({ disabled: true });
+  server.close(() => process.exit(0));
+  server.closeIdleConnections();
 }
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => shutdown());
 await scanner.start();

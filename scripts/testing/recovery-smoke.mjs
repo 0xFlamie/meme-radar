@@ -25,17 +25,18 @@ const request = (route, body) => new Promise((resolve, reject) => {
   req.end(body?JSON.stringify(body):undefined);
 });
 try {
-  for (const item of ['src','public','scripts/setup.mjs','scripts/open.mjs','scripts/supervise.mjs','package.json']) {
+  for (const item of ['src','public','scripts/setup.mjs','scripts/open.mjs','scripts/supervise.mjs','scripts/launcher-health.mjs','package.json','package-lock.json']) {
     const target=path.join(temporary,item); fs.mkdirSync(path.dirname(target),{recursive:true}); fs.cpSync(path.join(root,item),target,{recursive:true});
   }
-  fs.symlinkSync(path.join(root,'node_modules'),path.join(temporary,'node_modules'),'dir');
-  fs.mkdirSync(path.join(temporary,'state'));
-  fs.writeFileSync(path.join(temporary,'state/gmgn-disconnected'),'disconnected\n');
   const env={...process.env,RADAR_PORT:String(port)};
-  for(const key of Object.keys(env)) if(key.startsWith('GMGN_')) delete env[key];
   await exec(process.execPath,[path.join(temporary,'scripts/open.mjs'),'--no-open'],{cwd:temporary,env,timeout:25000});
-  supervisorPid=Number(fs.readFileSync(path.join(temporary,`.runtime/supervisor-${port}.lock/pid`),'utf8'));
-  assert.equal((await request('/api/status')).gmgnConnection.configured,false);
+  const supervisorLock=path.join(temporary,`.runtime/supervisor-${port}.lock`);
+  const lockStat=fs.lstatSync(supervisorLock);
+  assert.equal(lockStat.isSymbolicLink(),false);
+  supervisorPid=Number(fs.readFileSync(lockStat.isFile()?supervisorLock:path.join(supervisorLock,'pid'),'utf8'));
+  assert.ok(Number.isSafeInteger(supervisorPid) && supervisorPid>0,'supervisor lock must name a valid owner');
+  assert.equal((await request('/api/status')).aveConnection.configured,false);
+  assert.equal(fs.existsSync(path.join(temporary,'node_modules')),false);
   await request('/api/scan-chains',{chains:['bsc','sol']});
   await request('/api/annotation',{chain:'bsc',address:'0x'+'1'.repeat(40),favorite:true,note:'recovery test'});
   const listener=async()=>Number((await exec('lsof',['-t','-iTCP:'+port,'-sTCP:LISTEN'])).stdout.trim());
@@ -52,7 +53,7 @@ try {
   const recovered=await request('/api/status');
   assert.deepEqual(recovered.scheduler.enabledChains,['bsc','sol']);
   assert.equal(Object.values(recovered.annotations)[0].note,'recovery test');
-  assert.equal(recovered.gmgnConnection.configured,false);
+  assert.equal(recovered.aveConnection.configured,false);
   console.log('隔离恢复实测通过：后台进程崩溃后自动拉起；多链设置、备注和断开状态均保留。');
 } finally {
   if(supervisorPid) { try{process.kill(supervisorPid,'SIGTERM');}catch{} await delay(1500); }
