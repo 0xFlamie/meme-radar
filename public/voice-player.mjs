@@ -1,5 +1,5 @@
 export const CANDIDATE_PHRASES = Object.freeze({
-  zh: '亲爱的老板～我找到一枚不错的币，快来看看',
+  zh: '发现新的候选代币，请查看。',
   en: 'A new meme candidate was found. Take a look.'
 });
 export const CANDIDATE_PHRASE = CANDIDATE_PHRASES.zh;

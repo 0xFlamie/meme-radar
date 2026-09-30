@@ -71,13 +71,13 @@ test('public status is a field allowlist and removes raw provider and queue deta
       discovery: {
         complete: false,
         checkedAt: 88,
-        trenches: { ok: false, code: 'GMGN_TIMEOUT', message: 'raw-secret-message' },
+        trenches: { ok: false, code: 'TIMEOUT', message: 'raw-secret-message' },
         trending: { ok: true, count: 9 }
       },
       lastAudit: {
         complete: false,
         checkedAt: 89,
-        endpoints: { info: { ok: true }, security: { ok: false, code: 'GMGN_REQUEST_FAILED', message: 'other-secret-message' } }
+        endpoints: { info: { ok: true }, security: { ok: false, code: 'READ_FAILED', message: 'other-secret-message' } }
       }
     },
     candidates: [{
@@ -106,13 +106,40 @@ test('public status is a field allowlist and removes raw provider and queue deta
   assert.equal(result.outcomeSummary.minimumSample, 50);
   assert.equal(result.outcomeSummary.calibrationReady, false);
   assert.equal(result.outcomeSummary.averageReturn24h, 0.21);
-  assert.equal(result.sourceHealth.discovery.trenches.message, 'GMGN数据请求超时。');
-  assert.equal(result.sourceHealth.lastAudit.endpoints.security.message, 'GMGN数据请求暂时失败。');
+  assert.equal(result.sourceHealth.discovery.trenches.message, '数据源请求超时。');
+  assert.equal(result.sourceHealth.lastAudit.endpoints.security.message, '数据源请求暂时失败。');
   assert.equal(result.candidates[0].info.website, '');
   assert.equal(result.candidates[0].secondary.security.verdict, 'NO_FATAL_FLAGS');
   assert.equal(result.candidates[0].secondary.market.websites[0], 'https://example.com/');
   assert.equal(result.error, '数据请求暂时失败，下一轮将自动重试。');
   assert.doesNotMatch(serialized, /do-not-return|candidate-secret|queue-secret|outcome-secret|raw-secret|other-secret|secondary-secret|privateField|rawDiscovery|"auditQueue":|"outcomes":/);
+});
+
+test('public failure events preserve only explicit allowlisted causes and never infer legacy error codes', () => {
+  const at = 1_800_000_000_000, raw = 'private_fixture https://invalid.example/path?key=fixture_key Authorization: Bearer fixture_key';
+  const cases = [
+    ['BUDGET_PAUSED', 'AVE_BUDGET', /每日|预算/], ['HOURLY_BUDGET_PAUSED', 'AVE_HOURLY_BUDGET', /小时|预算/],
+    ['TOTAL_BUDGET_PAUSED', 'AVE_TOTAL_BUDGET', /累计|预算/], ['QUOTA_PAUSED', 'AVE_QUOTA', /配额/],
+    ['AUTH', 'AVE_AUTH', /凭证|权限/], ['RATE_LIMITED', 'AVE_RATE_LIMITED', /请求受限|冷却/],
+    ['TIMEOUT', 'AVE_TIMEOUT', /超时/], ['NETWORK', 'AVE_NETWORK', /连接失败/], ['ERROR', 'AVE_SCHEMA', /格式|身份/]
+  ];
+  const events = cases.map(([type, code]) => ({ at, type, code, stage: 'discovery', chain: 'bsc', message: raw, headers: { authorization: raw }, url: raw }));
+  events.push({ at, type: 'AUDIT_RETRY', code: raw, stage: raw, chain: 'bsc', message: raw });
+  events.push({ at, type: 'ERROR', chain: 'bsc', message: 'AVE_RATE_LIMITED old text has no structured proof' });
+  events.push({ at, type: 'ERROR', code: 'AVE_TIMEOUT', stage: 'audit', chain: 'bsc', message: raw });
+  const output = toPublicStatus({ events }).events;
+  for (let index = 0; index < cases.length; index++) {
+    const [type, code, pattern] = cases[index];
+    assert.equal(output[index].type, type); assert.equal(output[index].code, code);
+    assert.equal(output[index].stage, 'discovery'); assert.match(output[index].message, pattern);
+    if (type.includes('BUDGET') || type === 'QUOTA_PAUSED') assert.doesNotMatch(output[index].message, /网络|连接失败|超时/);
+  }
+  assert.equal(output.at(-3).code, null); assert.equal(output.at(-3).stage, null);
+  assert.equal(output.at(-2).type, 'ERROR'); assert.equal(output.at(-2).code, null); assert.equal(output.at(-2).stage, null);
+  assert.match(output.at(-2).message, /未分类/);
+  assert.equal(output.at(-1).code, 'AVE_TIMEOUT'); assert.match(output.at(-1).message, /^深审：.*超时/);
+  assert.doesNotMatch(JSON.stringify(output), /private_fixture|fixture_key|invalid\.example|Authorization|headers|https?:/);
+  assert.equal(events.at(-2).code, undefined, 'projection must not mutate or backfill a historical record');
 });
 
 test('health separates service liveness from scanner readiness and freshness', () => {
@@ -160,6 +187,22 @@ function dispatch(server, { method = 'GET', pathName = '/', headers = {}, body =
   });
 }
 
+test('public request diagnostics preserve schema failures even with HTTP 200 and redact nonallowlisted fields', async () => {
+  const raw = 'private_fixture https://invalid.example/?key=fixture_key';
+  const server = createServer({ settings, state: { value: { activeChain: 'bsc', status: 'RUNNING', candidates: [] } },
+    getMarketStatus: () => ({ transport: { recent: [
+      { at: 1_800_000_000_000, endpoint: 'trending', chain: 'bsc', category: 'schema', httpStatus: 200,
+        code: 'AVE_SCHEMA', message: raw, headers: { authorization: raw }, url: raw, raw },
+      { at: 1_800_000_000_001, endpoint: raw, chain: raw, category: raw, httpStatus: 500 }
+    ] } }) });
+  const response = await dispatch(server, { pathName: '/api/status' });
+  assert.equal(response.status, 200);
+  const recent = JSON.parse(response.body).aveMarket.transport.recent;
+  assert.equal(recent[0].category, 'schema'); assert.equal(recent[0].httpStatus, 200);
+  assert.equal(recent[1].category, 'unknown'); assert.equal(recent[1].endpoint, 'unknown'); assert.equal(recent[1].chain, '');
+  assert.doesNotMatch(JSON.stringify(recent), /private_fixture|fixture_key|invalid\.example|authorization|headers|https?:|"raw"/);
+});
+
 test('AVE configuration is local-only, requires same-origin JSON and never opens trading routes', async () => {
   let calls = 0;
   const snapshot = { data: { configured: true }, trade: { configured: false }, executionReady: false };
@@ -180,7 +223,6 @@ test('AVE configuration is local-only, requires same-origin JSON and never opens
 
 test('HTTP handler enforces local boundary, strong CSP and only safe local configuration writes', async () => {
   let switchedTo = '';
-  let savedKey = '';
   const state = { value: { status: 'RUNNING', generatedAt: Date.now(), candidates: [] } };
   const server = createServer({
     state,
@@ -189,10 +231,6 @@ test('HTTP handler enforces local boundary, strong CSP and only safe local confi
     switchChain: async chain => {
       switchedTo = chain;
       return { activeChain: 'robinhood', pendingChain: chain, queued: true };
-    },
-    saveGmgnKey: async apiKey => {
-      savedKey = apiKey;
-      return { configured: true, verified: true };
     }
   });
   const page = await dispatch(server);
@@ -206,7 +244,7 @@ test('HTTP handler enforces local boundary, strong CSP and only safe local confi
   assert.equal(linkedPage.status, 200);
   assert.match(linkedPage.headers['content-type'], /text\/html/);
   assert.equal((await dispatch(server, { pathName: '/api/status', headers: navigationHeaders })).status, 403);
-  assert.equal((await dispatch(server, { pathName: '/api/gmgn-key', method: 'POST', headers: navigationHeaders })).status, 403);
+  assert.equal((await dispatch(server, { pathName: '/api/ave-configure', method: 'POST', headers: navigationHeaders })).status, 403);
   assert.equal((await dispatch(server, { headers: { ...navigationHeaders, 'Sec-Fetch-Dest': 'iframe' } })).status, 403);
   assert.equal((await dispatch(server, { headers: { ...navigationHeaders, Origin: 'https://foreign.example' } })).status, 403);
 
@@ -233,46 +271,6 @@ test('HTTP handler enforces local boundary, strong CSP and only safe local confi
     queued: true
   });
 
-  const key = `gmgn_${'c3'.repeat(16)}`;
-  const keyResponse = await dispatch(server, {
-    method: 'POST',
-    pathName: '/api/gmgn-key',
-    headers: {
-      Origin: 'http://127.0.0.1:3791',
-      'Sec-Fetch-Site': 'same-origin',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ apiKey: key })
-  });
-  assert.equal(keyResponse.status, 200);
-  assert.equal(savedKey, key);
-  assert.deepEqual(JSON.parse(keyResponse.body), { accepted: true, configured: true, verified: true });
-  assert.doesNotMatch(keyResponse.body, /gmgn_/);
-
-  const missingOrigin = await dispatch(server, {
-    method: 'POST',
-    pathName: '/api/gmgn-key',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ apiKey: key })
-  });
-  assert.equal(missingOrigin.status, 403);
-
-  const invalidKey = await dispatch(server, {
-    method: 'POST',
-    pathName: '/api/gmgn-key',
-    headers: { Origin: 'http://127.0.0.1:3791', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ apiKey: 'invalid' })
-  });
-  assert.equal(invalidKey.status, 400);
-  assert.deepEqual(JSON.parse(invalidKey.body), { error: 'gmgn_key_request_rejected' });
-
-  const extraField = await dispatch(server, {
-    method: 'POST',
-    pathName: '/api/gmgn-key',
-    headers: { Origin: 'http://127.0.0.1:3791', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ apiKey: key, echo: true })
-  });
-  assert.equal(extraField.status, 400);
 
   const unsupported = await dispatch(server, {
     method: 'POST',
@@ -289,72 +287,4 @@ test('HTTP handler enforces local boundary, strong CSP and only safe local confi
     body: '{}'
   });
   assert.equal(forbiddenWrite.status, 405);
-});
-
-test('GMGN onboarding returns only a local public key and official creation URL', async () => {
-  const publicKey = '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA111111111111111111111111111111111111111=\n-----END PUBLIC KEY-----\n';
-  let regenerate = null;
-  const server = createServer({ state: { value: {} }, settings,
-    getGmgnOnboarding: options => {
-      regenerate = options.regenerate;
-      return { algorithm: 'Ed25519', publicKey,
-        createUrl: `https://gmgn.ai/ai/generateapi?pbk=${encodeURIComponent(publicKey)}` };
-    }
-  });
-  const response = await dispatch(server, { method: 'POST', pathName: '/api/gmgn-onboarding',
-    headers: { Origin: 'http://127.0.0.1:3791', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ regenerate: true })
-  });
-  assert.equal(response.status, 200);
-  assert.equal(regenerate, true);
-  const result = JSON.parse(response.body);
-  assert.equal(result.publicKey, publicKey);
-  assert.equal(result.createUrl.startsWith('https://gmgn.ai/ai/generateapi?pbk='), true);
-  assert.equal(response.body.includes('PRIVATE KEY'), false);
-  assert.equal((await dispatch(server, { method: 'POST', pathName: '/api/gmgn-onboarding',
-    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ regenerate: false }) })).status, 403);
-  assert.equal((await dispatch(server, { method: 'POST', pathName: '/api/gmgn-onboarding',
-    headers: { Origin: 'http://127.0.0.1:3791', 'Content-Type': 'application/json' }, body: '{}' })).status, 400);
-});
-
-test('key verification errors are allowlisted and never expose upstream messages', async () => {
-  const cases = [
-    ['GMGN_AUTH_FAILED', 401, 'gmgn_auth_failed'],
-    ['GMGN_PERMISSION_DENIED', 403, 'gmgn_permission_denied'],
-    ['GMGN_RATE_LIMITED', 429, 'gmgn_rate_limited'],
-    ['GMGN_CHECK_BUSY', 409, 'gmgn_check_busy'],
-    ['GMGN_TIMEOUT', 504, 'gmgn_timeout'],
-    ['GMGN_NETWORK_ERROR', 502, 'gmgn_network_error'],
-    ['GMGN_DEPENDENCY_MISSING', 503, 'gmgn_dependency_missing'],
-    ['UNEXPECTED', 500, 'gmgn_key_request_rejected']
-  ];
-  for (const [code, status, expected] of cases) {
-    const server = createServer({ state: { value: {} }, settings,
-      saveGmgnKey: async () => { throw Object.assign(new Error('upstream-secret-must-not-appear'), { code }); }
-    });
-    const response = await dispatch(server, { method: 'POST', pathName: '/api/gmgn-key',
-      headers: { Origin: 'http://127.0.0.1:3791', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey: `gmgn_${'a'.repeat(32)}` })
-    });
-    assert.equal(response.status, status);
-    const result = JSON.parse(response.body);
-    assert.equal(result.error, expected);
-    if (code === 'GMGN_RATE_LIMITED') assert.equal(result.retryAfterSeconds, 30);
-    else assert.deepEqual(result, { error: expected });
-  }
-});
-
-test('connection status exposes only readiness and saving alone cannot be reported as verified', async () => {
-  const server = createServer({ state: { value: {} }, settings,
-    getGmgnConnection: () => ({ configured: true, status: 'VERIFIED', apiKey: 'must-not-leak' }),
-    saveGmgnKey: async () => ({ configured: true })
-  });
-  const response = await dispatch(server, { pathName: '/api/status' });
-  assert.deepEqual(JSON.parse(response.body).gmgnConnection, { configured: true, status: 'VERIFIED' });
-  assert.equal(response.body.includes('must-not-leak'), false);
-  const unverified = await dispatch(server, { method: 'POST', pathName: '/api/gmgn-key',
-    headers: { Origin: 'http://127.0.0.1:3791', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ apiKey: `gmgn_${'a'.repeat(32)}` })
-  });
-  assert.equal(unverified.status, 502);
 });

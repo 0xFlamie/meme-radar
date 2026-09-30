@@ -2,7 +2,6 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { normalizeGmgnApiKey } from './gmgn-key-store.mjs';
 import { secondaryChainSupport } from './secondary.mjs';
 import { tokenKey } from './local-store.mjs';
 import { CHART_RISK_VERSION, applyRiskExclusion } from './chart-risk.mjs';
@@ -58,7 +57,7 @@ function publicError(status) {
   if (status === 'BUDGET_PAUSED') return '本机每日预算已用完，下一预算日继续。';
   if (status === 'QUOTA_PAUSED') return 'AVE 返回配额不足，已暂停请求，不会自动购买。';
   if (status === 'RATE_LIMITED') return '行情接口请求受限，系统将等待冷却后复查。';
-  if (status === 'GMGN_AUTH_REQUIRED') return 'GMGN只读数据源尚未完成本机配置。';
+  if (['AUTH_REQUIRED', 'AVE_AUTH_REQUIRED'].includes(status)) return 'AVE 行情凭证尚未配置或未通过验证。';
   if (status === 'DEGRADED') return '本轮部分数据不完整，系统将自动复查。';
   if (status === 'ERROR' || status === 'STATE_ERROR') return '数据请求暂时失败，下一轮将自动重试。';
   return '';
@@ -147,18 +146,21 @@ function rejectedAuditKeys(scope, chain) {
 
 function currentLiveRows(rows, scope, chain, now = Date.now()) {
   const history = new Map((scope?.auditQueue || []).filter(row => row && typeof row.address === 'string')
-    .map(row => [tokenKey(chain, row.address), finiteOrNull(row.firstSeenAt)]));
+    .map(row => [tokenKey(chain, row.address), row]));
   return (rows || []).flatMap(row => {
     if (!row || row.auditEligible !== true || row.stale === true || row.discoveryState !== 'READY') return [];
     const remembered = history.get(tokenKey(chain, row.address));
-    const firstSeenAt = [remembered, finiteOrNull(row.firstSeenAt), finiteOrNull(row.newAt), finiteOrNull(row.sourceUpdatedAt)]
+    const firstSeenAt = [finiteOrNull(row.firstSeenAt), finiteOrNull(remembered?.firstSeenAt), finiteOrNull(row.newAt), finiteOrNull(row.sourceUpdatedAt)]
       .find(value => value !== null && value > 0 && value <= now);
     if (!firstSeenAt) return [];
-    // The durable queue records the first time this contract actually passed
-    // the fast screen. Reappearing on another trending page keeps that clock;
-    // repeat speech is controlled by the voice tracker, not by deleting UI
-    // cards after an arbitrary wall-clock window.
-    return [{ ...row, firstSeenAt, newAt: firstSeenAt, retainedSnapshot: false,
+    const qualificationClocks = [finiteOrNull(remembered?.qualifiedAt), finiteOrNull(row.qualifiedAt)]
+      .filter(value => value !== null && value > 0 && value <= now);
+    // Both the durable queue and live discovery record first qualification.
+    // Queue arrival (including legacy favorites/monitors) is not proof.
+    // Preserve the earlier proof; legacy live rows fall back to their old clock,
+    // never to the current request time or a refreshed quote.
+    const qualifiedAt = qualificationClocks.length ? Math.min(...qualificationClocks) : firstSeenAt;
+    return [{ ...row, firstSeenAt, qualifiedAt, retainedSnapshot: false,
       displayEligible: true, evidenceStale: false }];
   });
 }
@@ -202,12 +204,11 @@ function liveVoiceRows(liveDiscovery, state, scope, chain) {
       volume5m: finiteOrNull(row.volume5m), createdAt: finiteOrNull(row.createdAt),
       ageBasis: ['pool', 'trade', 'launch', 'token'].includes(row.ageBasis) ? row.ageBasis : 'unknown',
       sourceUpdatedAt: finiteOrNull(row.sourceUpdatedAt), firstSeenAt: finiteOrNull(row.firstSeenAt),
-      newAt: finiteOrNull(row.newAt),
+      newAt: finiteOrNull(row.newAt), qualifiedAt: finiteOrNull(row.qualifiedAt),
       status: row.auditEligible && !row.stale && row.discoveryState === 'READY' ? 'LIVE_READY' : 'LIVE_WAIT',
-      // The latest upstream observation is also the moment a previously
-      // incomplete row can become eligible. Quiet baselines and the 24-hour
-      // address history prevent quote refreshes from creating repeat alerts.
-      auditedAt: finite(row.newAt || row.sourceUpdatedAt),
+      // Only the first fresh qualification opens the notification window.
+      // Seven-day chain/address dedupe remains independent of quote updates.
+      auditedAt: finite(row.qualifiedAt),
       staleAt: finite(row.expiresAt),
       qualified: row.auditEligible === true && row.stale !== true && row.discoveryState === 'READY' && !excluded
     };
@@ -233,7 +234,7 @@ function optionalMarketNumber(value) {
 }
 function publicLiveSnapshot(source = {}, chain) {
   const statuses = ['WAITING', 'LOADING', 'READY', 'AUTH_REQUIRED', 'ERROR', 'BUDGET_PAUSED', 'HOURLY_BUDGET_PAUSED', 'TOTAL_BUDGET_PAUSED', 'QUOTA_PAUSED', 'RATE_LIMITED'];
-  const codes = new Set(['READ_FAILED', 'GMGN_RATE_LIMITED', 'GMGN_AUTH_FAILED', 'GMGN_PERMISSION_DENIED', 'GMGN_TIMEOUT', ...AVE_PUBLIC_CODES]);
+  const codes = new Set(['READ_FAILED', ...AVE_PUBLIC_CODES]);
   const output = { chain, marketProvider: source.marketProvider === 'AVE' ? 'AVE' : null,
     status: statuses.includes(source.status) ? source.status : 'WAITING', code: codes.has(source.code) ? source.code : null,
     execution: false, stale: source.stale !== false,
@@ -246,7 +247,7 @@ function publicLiveSnapshot(source = {}, chain) {
         && (chain === 'sol' ? /^[1-9A-HJ-NP-Za-km-z]{32,44}$/ : /^0x[0-9a-f]{40}$/i).test(row.address))
       .map(row => ({ address: row.address, chain, symbol: publicMessage(row.symbol, '?', 30), name: publicMessage(row.name, '', 80),
         ...Object.fromEntries(['marketCap', 'liquidity', 'createdAt', 'price', 'volume1m', 'buys1m', 'sells1m', 'swaps1m', 'holders', 'smartMoney',
-          'volume5m', 'buys5m', 'sells5m', 'observedAt', 'capturedAt', 'sourceUpdatedAt', 'expiresAt', 'holderSourceUpdatedAt', 'firstSeenAt', 'newAt', 'deltaWindowMs']
+          'volume5m', 'buys5m', 'sells5m', 'observedAt', 'capturedAt', 'sourceUpdatedAt', 'expiresAt', 'holderSourceUpdatedAt', 'firstSeenAt', 'newAt', 'qualifiedAt', 'deltaWindowMs']
           .map(key => [key, optionalMarketNumber(row[key])])),
         ...Object.fromEntries(['priceDelta', 'holdersDelta', 'smartDelta'].map(key => [key,
           typeof row[key] === 'number' && Number.isFinite(row[key]) ? row[key] : null])),
@@ -287,7 +288,6 @@ function publicCandidate(row = {}) {
     buys: row.marketProvider === 'AVE' ? optionalMarketNumber(row.buys) : finite(row.buys),
     sells: row.marketProvider === 'AVE' ? optionalMarketNumber(row.sells) : finite(row.sells),
     twitter: text(row.twitter, 80),
-    gmgnUrl: externalUrl(row.gmgnUrl),
     status: ['X_REVIEW', 'QUALIFIED'].includes(row.status) && !currentRules ? 'WAIT_RECHECK' : text(row.status, 32),
     auditedAt: finite(row.auditedAt),
     staleAt: finite(row.staleAt),
@@ -404,14 +404,27 @@ function publicRejected(row = {}) {
 
 function publicEvent(event = {}) {
   const type = text(event.type, 32);
-  const fixedMessage = type === 'ERROR'
-    ? '数据请求暂时失败，系统会在下一轮重试。'
-    : type === 'RATE_LIMITED'
-      ? 'GMGN请求频率超限，系统已进入等待重试。'
-      : type === 'AUTH'
-        ? 'GMGN只读数据源尚未完成本机配置。'
-        : publicMessage(event.message, '雷达状态已更新。', 160);
-  return { at: finite(event.at), type, chain: text(event.chain, 32), message: fixedMessage };
+  const code = AVE_PUBLIC_CODES.has(event.code) ? event.code : null;
+  const stage = ['discovery', 'audit'].includes(event.stage) ? event.stage : null;
+  const failures = {
+    ERROR: '扫描遇到未分类问题；该历史记录未提供更具体的原因。',
+    AUDIT_RETRY: '深审暂未完成，已进入复查队列。',
+    RATE_LIMITED: '行情请求频率受限，等待冷却后再调度。',
+    BUDGET_PAUSED: '本机每日行情预算保护，等待下一预算窗口。',
+    HOURLY_BUDGET_PAUSED: '本机小时行情预算保护，等待下一预算窗口。',
+    TOTAL_BUDGET_PAUSED: '本机累计行情预算保护，需人工核对剩余额度。',
+    QUOTA_PAUSED: 'AVE 配额不足，行情请求已暂停。',
+    AUTH: 'AVE 行情凭证尚未配置或未通过验证。',
+    TIMEOUT: '行情响应超时，等待下一轮调度。',
+    NETWORK: '行情连接失败，等待下一轮调度。'
+  };
+  // Never infer an old error code from free-form text. New failures carry an
+  // explicit allowlisted code; both old and new error messages are fixed text.
+  const message = Object.hasOwn(failures, type)
+    ? (code ? healthMessage({ code }, 'AVE') : failures[type])
+    : publicMessage(event.message, '雷达状态已更新。', 160);
+  return { at: finite(event.at), type, chain: text(event.chain, 32), code, stage,
+    message: stage === 'audit' && Object.hasOwn(failures, type) ? `深审：${message}` : message };
 }
 
 function countSummary(source, allowedKeys) {
@@ -436,14 +449,16 @@ function healthMessage(row = {}, provider) {
       AVE_NETWORK: 'AVE 行情连接失败。', AVE_SCHEMA: 'AVE 行情格式或身份未通过核验。', AVE_SIZE: 'AVE 行情响应超过大小限制。',
       AVE_CHANGED: 'AVE 配置已变化，本次数据未采用。', AVE_ABORTED: 'AVE 行情请求已取消。', AVE_BUSY: 'AVE 行情队列已满。',
       AVE_UPSTREAM: 'AVE 行情请求未成功。',
+      AVE_DISCOVERY_RESERVE: '为保留发现额度，补充核验暂缓。', AVE_INPUT: 'AVE 只读请求参数未通过核验。',
+      AVE_REQUEST_FAILED: '本轮扫描未完成，具体原因尚未分类。',
     };
     return messages[code] || 'AVE 核验证据状态未知，不能视为已通过。';
   }
-  if (/RATE_LIMIT/.test(code)) return 'GMGN请求频率受限，系统将自动重试。';
-  if (/AUTH|UNAUTHORIZED/.test(code)) return 'GMGN只读授权无效或已失效。';
-  if (/PERMISSION|FORBIDDEN/.test(code)) return 'GMGN当前权限无法读取该数据。';
-  if (/TIMEOUT/.test(code)) return 'GMGN数据请求超时。';
-  return 'GMGN数据请求暂时失败。';
+  if (/RATE_LIMIT/.test(code)) return '数据源请求频率受限，系统将自动重试。';
+  if (/AUTH|UNAUTHORIZED/.test(code)) return '数据源只读授权无效或已失效。';
+  if (/PERMISSION|FORBIDDEN/.test(code)) return '数据源当前权限无法读取该数据。';
+  if (/TIMEOUT/.test(code)) return '数据源请求超时。';
+  return '数据源请求暂时失败。';
 }
 
 function endpointHealth(row = {}, provider) {
@@ -790,11 +805,32 @@ function allowedChainIds(supportedChains) {
 const versionValue = value => typeof value === 'string' && /^(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})$/.test(value) ? value : null;
 const AVE_PUBLIC_CODES = new Set(['AVE_AUTH', 'AVE_RATE_LIMIT', 'AVE_RATE_LIMITED', 'AVE_QUOTA', 'AVE_BUDGET', 'AVE_HOURLY_BUDGET', 'AVE_TOTAL_BUDGET', 'AVE_BUDGET_STORE', 'AVE_DISCOVERY_RESERVE',
   'AVE_STORAGE', 'AVE_SCHEMA', 'AVE_SIZE', 'AVE_TIMEOUT', 'AVE_CHANGED', 'AVE_ABORTED', 'AVE_DISABLED', 'AVE_BUSY', 'AVE_CONNECT',
-  'AVE_NETWORK', 'AVE_UPSTREAM', 'AVE_CONFIG', 'AVE_KEY', 'AVE_INPUT', 'AVE_COOLDOWN', 'AVE_RELOAD', 'AVE_FIELD_UNVERIFIED']);
+  'AVE_NETWORK', 'AVE_UPSTREAM', 'AVE_CONFIG', 'AVE_KEY', 'AVE_INPUT', 'AVE_COOLDOWN', 'AVE_RELOAD', 'AVE_FIELD_UNVERIFIED', 'AVE_REQUEST_FAILED']);
 const UPDATE_PUBLIC_CODES = new Set(['UPDATE_NETWORK', 'UPDATE_STORAGE', 'UPDATE_LOCAL', 'UPDATE_CHECKSUM', 'UPDATE_ARCHIVE',
   'UPDATE_BUSY', 'UPDATE_VERSION', 'UPDATE_PLATFORM', 'UPDATE_DEPENDENCIES', 'UPDATE_HANDOFF', 'UPDATE_START']);
 const readSnapshot = callback => { try { return callback?.() || {}; } catch { return {}; } };
 const nonnegative = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+const SCREENING_REASON_KEYS = ['stale', 'missing_market', 'market_cap', 'age', 'liquidity', 'activity', 'known_risk', 'other'];
+function publicScreening(source = {}, settings = {}) {
+  source ||= {};
+  return { mode: 'market_only', securityStatus: 'UNVERIFIED', deepAuditEnabled: settings.maxDeepAuditsPerCycle > 0,
+    checkedAt: nonnegative(source.checkedAt), countsAvailable: source.checkedAt > 0,
+    ...Object.fromEntries(['received', 'marketQualified', 'filtered'].map(key => [key, nonnegative(source[key])])),
+    reasonCounts: Object.fromEntries(SCREENING_REASON_KEYS.map(key => [key, nonnegative(source.reasonCounts?.[key])])) };
+}
+function publicScheduler(source, enabledChains, selectedChain, publicChains) {
+  const reasons = ['shared_cadence', 'backoff', 'recovery_chain_deferred', 'manual_reset_required', 'auth_required', 'disabled', 'stopped', 'scanning'];
+  const timestamp = value => typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+  return {
+    scope: 'shared-provider', selectedChain, selectedEnabled: enabledChains.includes(selectedChain),
+    sharedIntervalMs: nonnegative(source.sharedIntervalMs), nominalChainIntervalMs: nonnegative(source.nominalChainIntervalMs),
+    eligibleChains: Array.isArray(source.eligibleChains) ? source.eligibleChains.filter(chain => publicChains.has(chain) && enabledChains.includes(chain)) : [],
+    queuePosition: Number.isSafeInteger(source.queuePosition) && source.queuePosition > 0 && source.queuePosition <= enabledChains.length ? source.queuePosition : null,
+    nextSharedAttemptAt: timestamp(source.nextSharedAttemptAt), selectedNextAttemptAt: timestamp(source.selectedNextAttemptAt),
+    estimate: ['earliest', 'in_progress'].includes(source.estimate) ? source.estimate : 'unavailable',
+    reason: reasons.includes(source.reason) ? source.reason : 'unavailable', guaranteed: false
+  };
+}
 function publicAveConnection(source = {}) {
   const configured = source.configured === true || source.data?.configured === true;
   const data = source.data || {};
@@ -820,7 +856,7 @@ function publicAveMarket(source = {}, supportedChains = []) {
       recent: (Array.isArray(source.transport?.recent) ? source.transport.recent : []).slice(-20).map(row => ({
         endpoint: ['trending', 'details', 'pair', 'klines'].includes(row?.endpoint) ? row.endpoint : 'unknown',
         chain: publicChains.has(row?.chain) ? row.chain : '',
-        category: ['ok', 'rate', 'quota', 'gateway', 'unknown', 'timeout', 'cancelled'].includes(row?.category) ? row.category : 'unknown',
+        category: ['ok', 'rate', 'quota', 'gateway', 'unknown', 'timeout', 'cancelled', 'schema'].includes(row?.category) ? row.category : 'unknown',
         ...Object.fromEntries(['at', 'httpStatus', 'durationMs', 'retryAt', 'retryAfterMs'].map(key => [key, nonnegative(row?.[key])])),
         startGapMs: finiteOrNull(row?.startGapMs)
       })) },
@@ -851,8 +887,8 @@ function publicUpdate(source = {}) {
     restartRequired: phase === 'handoff', repository: 'nhovongoc0-max/meme-radar' };
 }
 
-export function createServer({ state, settings, controls, switchChain, saveGmgnKey, disconnectGmgnKey, getGmgnOnboarding, getGmgnConnection,
-  liveDiscovery, enqueueReview, ave, getAveConnection, getMarketStatus, updater, onUpdateReady, supportedChains = [] }) {
+export function createServer({ state, settings, controls, switchChain,
+  liveDiscovery, enqueueReview, ave, getAveConnection, getMarketStatus, getSchedulerStatus, updater, onUpdateReady, supportedChains = [] }) {
   const publicChains = allowedChainIds(supportedChains);
   const dashboard = path.join(settings.publicDir, 'index.html');
   const dashboardHtml = fs.readFileSync(dashboard, 'utf8');
@@ -925,6 +961,7 @@ export function createServer({ state, settings, controls, switchChain, saveGmgnK
           || !publicChains.has(body.chain)) return sendJson(res, 400, { error: 'invalid_live_request' }, csp);
         if (url.pathname === '/api/live-review') {
           if (typeof body.address !== 'string' || body.address.length > 80 || !enqueueReview) return sendJson(res, 400, { error: 'invalid_live_request' }, csp);
+          if (!(settings.maxDeepAuditsPerCycle > 0)) return sendJson(res, 409, { accepted: false, reason: 'deep_audit_disabled' }, csp);
           const row = liveDiscovery.auditRow(body.chain, body.address);
           const result = row ? enqueueReview(body.chain, row) : { accepted: false, reason: 'snapshot_expired' };
           return sendJson(res, result.accepted ? 200 : 409, result, csp);
@@ -962,16 +999,11 @@ export function createServer({ state, settings, controls, switchChain, saveGmgnK
       }
     }
 
-    if (req.method === 'POST' && ['/api/scan-chains', '/api/annotation', '/api/gmgn-disconnect'].includes(url.pathname)) {
+    if (req.method === 'POST' && ['/api/scan-chains', '/api/annotation'].includes(url.pathname)) {
       if (!req.headers.origin) return sendJson(res, 403, { error: 'local_request_required' }, csp);
       try {
         const body = await readSmallJson(req, 4096);
         if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJson(res, 400, { error: 'invalid_settings' }, csp);
-        if (url.pathname === '/api/gmgn-disconnect') {
-          if (Object.keys(body).length) return sendJson(res, 400, { error: 'invalid_settings' }, csp);
-          if (typeof disconnectGmgnKey !== 'function') return sendJson(res, 503, { error: 'gmgn_unavailable' }, csp);
-          return sendJson(res, 200, disconnectGmgnKey(), csp);
-        }
         if (!controls) return sendJson(res, 503, { error: 'settings_unavailable' }, csp);
         if (url.pathname === '/api/scan-chains') {
           if (Object.keys(body).length !== 1) return sendJson(res, 400, { error: 'invalid_settings' }, csp);
@@ -982,71 +1014,6 @@ export function createServer({ state, settings, controls, switchChain, saveGmgnK
       } catch (error) { return sendJson(res, error?.statusCode === 400 ? 400 : 500, { error: 'settings_not_saved' }, csp); }
     }
 
-    if (url.pathname === '/api/gmgn-key' && req.method === 'POST') {
-      if (!req.headers.origin) return sendJson(res, 403, { error: 'gmgn_key_request_rejected' }, csp);
-      if (typeof saveGmgnKey !== 'function') return sendJson(res, 503, { error: 'gmgn_key_request_rejected' }, csp);
-      try {
-        const body = await readSmallJson(req, 512);
-        if (!body || Array.isArray(body) || typeof body !== 'object' || Object.keys(body).length !== 1 || typeof body.apiKey !== 'string') {
-          return sendJson(res, 400, { error: 'gmgn_key_request_rejected' }, csp);
-        }
-        const apiKey = normalizeGmgnApiKey(body.apiKey);
-        if (!apiKey) return sendJson(res, 400, { error: 'gmgn_key_request_rejected' }, csp);
-        const result = await saveGmgnKey(apiKey);
-        if (result?.verified !== true || result?.configured !== true) {
-          return sendJson(res, 502, { error: 'gmgn_verification_failed' }, csp);
-        }
-        return sendJson(res, 200, { accepted: true, configured: true, verified: true }, csp);
-      } catch (error) {
-        const safeErrors = {
-          GMGN_AUTH_FAILED: [401, 'gmgn_auth_failed'],
-          GMGN_PERMISSION_DENIED: [403, 'gmgn_permission_denied'],
-          GMGN_RATE_LIMITED: [429, 'gmgn_rate_limited'],
-          GMGN_CHECK_BUSY: [409, 'gmgn_check_busy'],
-          GMGN_TIMEOUT: [504, 'gmgn_timeout'],
-          GMGN_NETWORK_ERROR: [502, 'gmgn_network_error'],
-          GMGN_DEPENDENCY_MISSING: [503, 'gmgn_dependency_missing'],
-          GMGN_ONBOARDING_REQUIRED: [409, 'gmgn_onboarding_required'],
-          GMGN_SIGNING_KEY_FAILED: [500, 'gmgn_signing_key_failed']
-        };
-        const safe = safeErrors[error?.code];
-        if (safe) {
-          const body = { error: safe[1] };
-          if (error?.code === 'GMGN_RATE_LIMITED') {
-            body.retryAfterSeconds = Math.max(1, Math.min(300, Math.ceil((Number(error.retryAfterMs) || 30_000) / 1000)));
-          }
-          return sendJson(res, safe[0], body, csp);
-        }
-        const statusCode = [400, 413, 415].includes(error?.statusCode) ? error.statusCode : 500;
-        return sendJson(res, statusCode, { error: 'gmgn_key_request_rejected' }, csp);
-      }
-    }
-
-    if (url.pathname === '/api/gmgn-onboarding' && req.method === 'POST') {
-      if (!req.headers.origin) {
-        return sendJson(res, 403, { error: 'gmgn_onboarding_rejected' }, csp);
-      }
-      if (typeof getGmgnOnboarding !== 'function') return sendJson(res, 503, { error: 'gmgn_unavailable' }, csp);
-      try {
-        const body = await readSmallJson(req, 64);
-        if (!body || Array.isArray(body) || typeof body !== 'object' || Object.keys(body).sort().join(',') !== 'regenerate'
-          || typeof body.regenerate !== 'boolean') {
-          return sendJson(res, 400, { error: 'gmgn_onboarding_rejected' }, csp);
-        }
-        const value = getGmgnOnboarding({ regenerate: body.regenerate });
-        if (value?.algorithm !== 'Ed25519'
-          || !/^-----BEGIN PUBLIC KEY-----[\s\S]+-----END PUBLIC KEY-----\s*$/.test(value?.publicKey || '')) {
-          return sendJson(res, 500, { error: 'gmgn_onboarding_failed' }, csp);
-        }
-        const createUrl = new URL(value.createUrl);
-        if (createUrl.protocol !== 'https:' || createUrl.hostname !== 'gmgn.ai' || createUrl.pathname !== '/ai/generateapi') {
-          return sendJson(res, 500, { error: 'gmgn_onboarding_failed' }, csp);
-        }
-        return sendJson(res, 200, { algorithm: 'Ed25519', publicKey: value.publicKey, createUrl: createUrl.href }, csp);
-      } catch {
-        return sendJson(res, 500, { error: 'gmgn_onboarding_failed' }, csp);
-      }
-    }
 
     if (url.pathname === '/api/active-chain' && req.method === 'POST') {
       if (typeof switchChain !== 'function') return sendJson(res, 503, { error: 'chain_switch_unavailable' }, csp);
@@ -1080,11 +1047,6 @@ export function createServer({ state, settings, controls, switchChain, saveGmgnK
 
     if (req.method !== 'GET') return sendJson(res, 405, { error: 'read_only_scanner' }, csp);
     if (url.pathname === '/api/status' || url.pathname === '/api/export') {
-      const snapshot = getGmgnConnection?.();
-      const gmgnConnection = {
-        configured: snapshot?.configured === true,
-        status: ['CHECKING', 'UNCONFIGURED', 'VERIFIED', 'CONFIGURED'].includes(snapshot?.status) ? snapshot.status : 'UNCONFIGURED'
-      };
       const chain = url.searchParams.get('chain');
       if (chain && !publicChains.has(chain)) return sendJson(res, 400, { error: 'unsupported_chain' }, csp);
       const configuredEnabledChains = Array.isArray(controls?.value.enabledChains)
@@ -1097,6 +1059,7 @@ export function createServer({ state, settings, controls, switchChain, saveGmgnK
           policy: { ...state.value.policy, chain }, scanInProgress: false }
         : state.value;
       const selected = selectedChainScope(storedSelection, chain, configuredEnabledChains, settings);
+      const scheduler = publicScheduler(readSnapshot(() => getSchedulerStatus?.(selected.activeChain)), enabledChains, selected.activeChain, publicChains);
       const annotations = Object.fromEntries(Object.entries(controls?.value.annotations || {}).filter(([, value]) =>
         publicChains.has(text(value?.chain, 32).toLowerCase())).slice(0, 500).map(([key, value]) => [key, {
           chain: text(value.chain, 32).toLowerCase(), address: text(value.address, 128), favorite: value.favorite === true,
@@ -1104,10 +1067,11 @@ export function createServer({ state, settings, controls, switchChain, saveGmgnK
         }]));
       const output = { ...toPublicStatus(selected), scanProvider: 'AVE',
         aveConnection: publicAveConnection(readSnapshot(getAveConnection || (() => ave?.snapshot()))),
-        aveMarket: publicAveMarket(readSnapshot(getMarketStatus), supportedChains), gmgnConnection, annotations,
+        aveMarket: publicAveMarket(readSnapshot(getMarketStatus), supportedChains), annotations,
         voiceSnapshot: voiceSnapshot(state.value, enabledChains, liveDiscovery),
+        screening: publicScreening(selected.screening, settings),
         scheduler: { scanningChain: text(state.value.activeChain, 32), enabledChains,
-          lastSuccessAt: finite(state.value.lastSuccessAt), status: text(state.value.status, 32) },
+          lastSuccessAt: finite(state.value.lastSuccessAt), status: text(state.value.status, 32), ...scheduler },
         coverage: Object.fromEntries([...publicChains].map(id => [id, {
           dexScreener: Boolean(secondaryChainSupport.dexScreener[id]), goPlus: Boolean(secondaryChainSupport.goPlus[id])
         }])),
@@ -1129,6 +1093,9 @@ export function createServer({ state, settings, controls, switchChain, saveGmgnK
         output.status = output.lastSuccessAt ? 'DEGRADED' : 'STARTING';
         output.retryAt = 0;
       }
+      // A persisted per-chain timer is not the shared scheduler's forecast.
+      // Zero means no finite next attempt is currently predictable, not now.
+      if (typeof getSchedulerStatus === 'function') output.nextCycleAt = scheduler.selectedNextAttemptAt || 0;
       if (url.pathname === '/api/export') {
         const scopes = { ...state.value.chainStates, [state.value.activeChain]: state.value };
         output.exportedAt = Date.now();

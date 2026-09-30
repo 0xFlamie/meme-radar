@@ -12,8 +12,6 @@
       "path": "packaging/windows-portable/launcher.cjs",
       "sha256": "9f0151a8c67872ad180b5af971a1ad729354f437c66be7dded60aea5d4668f9c"
     },
-    "copiedPrefixes": [
-      "node_modules/"
-    ]
+    "copiedPrefixes": []
   }
 }

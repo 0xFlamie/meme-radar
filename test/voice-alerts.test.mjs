@@ -5,6 +5,7 @@ import { VoiceAlerts, voiceEligible, voiceKey, VOICE_TTL } from '../public/voice
 import { CANDIDATE_PHRASE, CANDIDATE_PHRASES, createVoicePlayer, selectChineseVoice, selectEnglishVoice, selectVoice } from '../public/voice-player.mjs';
 import { voiceSnapshot, toPublicStatus, createServer } from '../src/server.mjs';
 import { config } from '../src/config.mjs';
+import { normalizeLiveRows } from '../src/live-discovery.mjs';
 
 const now = 1_800_000_000_000;
 const row = (address = '0x' + 'a'.repeat(40), at = now) => ({ address, chain: 'bsc',
@@ -38,6 +39,59 @@ test('fresh unified live candidates alert once while incomplete or stale live ro
   assert.equal(tracker.batch({}, now + 2000).length, 0);
   assert.equal(voiceEligible({ ...live, status: 'LIVE_WAIT', qualified: false }, now + 1000), false);
   assert.equal(voiceEligible({ ...live, staleAt: now + 999 }, now + 1000), false);
+});
+
+test('late first READY promotion speaks once without changing discovery time or renewing the qualification clock', () => {
+  const at = Date.now() - 5_000, foundAt = at - 11 * 60_000, address = '0x' + 'c'.repeat(40);
+  const raw = capturedAt => ({ address, chain: 'bsc', marketProvider: 'AVE', market_cap: 50_000,
+    price: 1, liquidity: 15_000, launch_at: Math.floor(foundAt / 1000) - 1_000, volume_5m: 1_000,
+    capturedAt, sourceUpdatedAt: capturedAt, expiresAt: capturedAt + 20_000 });
+  let rows = normalizeLiveRows([{ ...raw(foundAt), volume_5m: null }], 'bsc', [], foundAt);
+  const live = { snapshot: () => ({ chain: 'bsc', marketProvider: 'AVE', status: 'READY', rows }) };
+  const state = { activeChain: 'bsc', candidates: [], auditQueue: [], chainStates: {}, riskExclusions: {} };
+  const tracker = new VoiceAlerts(); tracker.reset(foundAt);
+  tracker.ingest(voiceSnapshot(state, ['bsc'], live), foundAt);
+  rows = normalizeLiveRows([raw(at)], 'bsc', rows, at, true);
+  let result = voiceSnapshot(state, ['bsc'], live);
+  assert.equal(result.chains.bsc[0].firstSeenAt, foundAt);
+  assert.equal(result.chains.bsc[0].newAt, 0);
+  assert.equal(result.chains.bsc[0].qualifiedAt, at);
+  assert.equal(result.chains.bsc[0].auditedAt, at);
+  tracker.ingest(result, at);
+  assert.equal(tracker.batch({}, at).length, 1, 'the eleven-minute-old pending discovery qualifies only now');
+  tracker.acknowledge(tracker.batch({}, at), at);
+  rows = normalizeLiveRows([{ ...raw(at + 1_000), volume_5m: null }], 'bsc', rows, at + 1_000, true);
+  tracker.ingest(voiceSnapshot(state, ['bsc'], live), at + 1_000);
+  rows = normalizeLiveRows([raw(at + 2_000)], 'bsc', rows, at + 2_000, true);
+  result = voiceSnapshot(state, ['bsc'], live);
+  assert.equal(result.chains.bsc[0].auditedAt, at);
+  tracker.ingest(result, at + 2_000);
+  assert.equal(tracker.batch({}, at + 2_000).length, 0, 'downgrade and re-promotion cannot replay an acknowledged contract');
+  state.auditQueue = [{ address, firstSeenAt: at - 1_000, qualifiedAt: at - 1_000 }];
+  assert.equal(voiceSnapshot(state, ['bsc'], live).chains.bsc[0].auditedAt, at - 1_000,
+    'an earlier durable qualification must not be renewed by live discovery');
+  rows = [{ ...rows[0], sourceUpdatedAt: foundAt, expiresAt: foundAt + 20_000 }];
+  assert.equal(voiceSnapshot(state, ['bsc'], live).chains.bsc.length, 0, 'a recent qualification cannot refresh expired market evidence');
+});
+
+test('an old favorite or legacy queue arrival cannot predate a live token first real qualification', () => {
+  const at = Date.now() - 1_000, foundAt = at - 11 * 60_000, address = '0x' + 'd'.repeat(40);
+  const source = { chain: 'bsc', marketProvider: 'AVE', status: 'READY', stale: false,
+    rows: [{ address, chain: 'bsc', marketProvider: 'AVE', capturedAt: at, sourceUpdatedAt: at,
+      expiresAt: at + 20_000, stale: false, auditEligible: true, discoveryState: 'READY',
+      firstSeenAt: foundAt, newAt: foundAt, qualifiedAt: at }] };
+  for (const watched of [true, false, undefined]) {
+    const state = { activeChain: 'bsc', candidates: [], chainStates: {}, riskExclusions: {},
+      auditQueue: [{ address, status: 'QUEUED', firstSeenAt: foundAt, watched }] };
+    const candidate = voiceSnapshot(state, ['bsc'], { snapshot: () => source }).chains.bsc[0];
+    assert.equal(candidate.firstSeenAt, foundAt);
+    assert.equal(candidate.qualifiedAt, at);
+    assert.equal(candidate.auditedAt, at);
+    assert.equal(voiceEligible(candidate, at), true);
+    const tracker = new VoiceAlerts(); tracker.reset(foundAt); tracker.ingest(snapshot([]), foundAt);
+    tracker.ingest(snapshot([candidate]), at);
+    assert.equal(tracker.batch({}, at).length, 1);
+  }
 });
 
 test('stale, ignored, unknown, failed, future and unaudited-before-enable candidates never alert', () => {
@@ -97,7 +151,7 @@ test('production voice snapshot feeds the unified pool from fresh live rows with
       discoveryState: 'READY', firstSeenAt: at - 4000, newAt: at - 3000 }] };
   const live = { snapshot: () => source };
   const state = { activeChain: 'bsc', candidates: [audit], chainStates: {}, riskExclusions: {},
-    auditQueue: [{ address, status: 'QUEUED', firstSeenAt: at - 3000 }] };
+    auditQueue: [{ address, status: 'QUEUED', firstSeenAt: at - 3000, qualifiedAt: at - 3000 }] };
   let result = voiceSnapshot(state, ['bsc'], live).chains.bsc;
   assert.equal(result.length, 1); assert.equal(result[0].source, 'live');
   assert.equal(result[0].status, 'LIVE_READY'); assert.equal(result[0].qualified, true);

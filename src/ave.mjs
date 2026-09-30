@@ -18,6 +18,7 @@ const ROUTE_TTL_MS = 30 * 60000;
 // existing enrichment-read allowance across primary and fallback reads.
 const MAX_PAIR_ATTEMPTS = 2;
 const PAIR_FALLBACK_CODES = new Set(['AVE_SCHEMA', 'AVE_UPSTREAM', 'AVE_NETWORK', 'AVE_TIMEOUT', 'AVE_SIZE']);
+const TRENDING_TAIL_FAILURE_CODES = new Set(['AVE_SCHEMA', 'AVE_UPSTREAM', 'AVE_NETWORK', 'AVE_TIMEOUT', 'AVE_SIZE']);
 const RATE_BASE_GAP_MS = 60_000;
 const RATE_TARGET_GAP_MS = 5 * 60_000;
 const RATE_MAX_GAP_MS = 15 * 60_000;
@@ -25,6 +26,7 @@ const RATE_RECOVERY_WINDOW_MS = 30 * 60_000;
 const RATE_FLOOR_RETRY_MS = 24 * 60 * 60_000;
 const ROTATION_READY_TARGET = 3;
 const ROTATION_SEEN_LIMIT = 600;
+const ROTATION_MAX_HEAD_STREAK = 2;
 const DOCUMENTED = new Set(['bsc', 'eth', 'base', 'sol']);
 const ORIGIN = 'https://prod.ave-api.com';
 const lanes = new WeakMap();
@@ -172,9 +174,17 @@ function tokenRow(row, chain, ca, required = false) {
   const price = numeric(row.current_price_usd);
   if (!(price > 0)) throw fail('SCHEMA');
   for (const field of ['market_cap', 'tvl', 'main_pair_tvl', 'token_tx_volume_usd_5m',
-    'token_buy_volume_u_5m', 'token_sell_volume_u_5m']) {
+    'token_buy_volume_u_5m', 'token_sell_volume_u_5m', 'token_buy_tx_volume_usd_5m', 'token_sell_tx_volume_usd_5m']) {
     if (row[field] != null && numeric(row[field]) === null) throw fail('SCHEMA');
   }
+  const volumeAlias = (legacy, production) => {
+    const a = numeric(row[legacy]), b = numeric(row[production]);
+    if (a !== null && b !== null && a !== b) throw fail('SCHEMA');
+    return b ?? a;
+  };
+  const buyVolume5m = volumeAlias('token_buy_volume_u_5m', 'token_buy_tx_volume_usd_5m');
+  const sellVolume5m = volumeAlias('token_sell_volume_u_5m', 'token_sell_tx_volume_usd_5m');
+  const mainPair = poolAddress(chain, row.main_pair);
   for (const field of ['holders', 'token_tx_count_5m', 'token_buy_tx_count_5m', 'token_sell_tx_count_5m']) {
     if (row[field] != null && !Number.isSafeInteger(numeric(row[field]))) throw fail('SCHEMA');
   }
@@ -186,8 +196,9 @@ function tokenRow(row, chain, ca, required = false) {
   if (row.token_price_change_5m != null && signedNumeric(row.token_price_change_5m) === null) throw fail('SCHEMA');
   return { token: ca, chain, apiChain: AVE_CHAINS[chain], name: text(row.name, 100), symbol: text(row.symbol, 40),
     current_price_usd: price, market_cap: numeric(row.market_cap), holders: numeric(row.holders), tvl: numeric(row.tvl),
-    main_pair_tvl: numeric(row.main_pair_tvl), token_tx_volume_usd_5m: numeric(row.token_tx_volume_usd_5m),
-    token_buy_volume_u_5m: numeric(row.token_buy_volume_u_5m), token_sell_volume_u_5m: numeric(row.token_sell_volume_u_5m),
+    main_pair_tvl: numeric(row.main_pair_tvl), main_pair: mainPair && !/^0x(?:0+|e{40})$/i.test(mainPair) ? mainPair : null,
+    token_tx_volume_usd_5m: numeric(row.token_tx_volume_usd_5m),
+    token_buy_volume_u_5m: buyVolume5m, token_sell_volume_u_5m: sellVolume5m,
     token_tx_count_5m: numeric(row.token_tx_count_5m), token_buy_tx_count_5m: numeric(row.token_buy_tx_count_5m),
     token_sell_tx_count_5m: numeric(row.token_sell_tx_count_5m), token_price_change_5m: signedNumeric(row.token_price_change_5m),
     launch_at: seconds(row.launch_at), created_at: seconds(row.created_at),
@@ -200,10 +211,10 @@ function outerEcho(raw, chain) {
 function parseTrending(raw, chain) {
   outerEcho(raw, chain); const data = envelope(raw, true); outerEcho(data, chain);
   if (!Array.isArray(data.tokens) || data.tokens.length > 100) throw fail('SCHEMA');
-  const seen = new Map(), invalid = new Set(), rows = [];
+  const seen = new Map(), invalid = new Set();
   for (const row of data.tokens) {
     const ca = address(chain, row?.token);
-    if (!ca) continue;
+    if (!ca || invalid.has(ca)) continue;
     let parsed;
     try { parsed = tokenRow(row, chain, ca, true); }
     catch (error) {
@@ -212,21 +223,21 @@ function parseTrending(raw, chain) {
       // item take an otherwise valid chain offline. A wholly invalid nonempty
       // response still fails closed below.
       if (error?.code !== 'AVE_SCHEMA') throw error;
-      if (seen.has(ca) || invalid.has(ca)) throw fail('SCHEMA');
+      seen.delete(ca);
       invalid.add(ca);
       continue;
     }
-    if (invalid.has(ca)) throw fail('SCHEMA');
     const prior = seen.get(ca);
     if (prior) {
       // AVE's Solana leaderboard can repeat an identical token row. Collapse
-      // only an identical validated market identity; conflicting duplicates
-      // remain a schema error so one address cannot smuggle two realities.
-      if (JSON.stringify(prior) !== JSON.stringify(parsed)) throw fail('SCHEMA');
+      // only an identical validated market identity. Conflicting facts
+      // quarantine this address for the entire page, not unrelated tokens.
+      if (JSON.stringify(prior) !== JSON.stringify(parsed)) { seen.delete(ca); invalid.add(ca); }
       continue;
     }
-    seen.set(ca, parsed); rows.push(parsed);
+    seen.set(ca, parsed);
   }
+  const rows = [...seen.values()];
   if (data.tokens.length && !rows.length) throw fail('SCHEMA');
   if (data.next_page != null && (!Number.isSafeInteger(data.next_page) || data.next_page < -1)) throw fail('SCHEMA');
   return { rows, nextPage: data.next_page ?? null };
@@ -320,6 +331,10 @@ function marketRow(row, capturedAt, now) {
   const launchedAt = row.launch_at ?? row.created_at;
   const ageBasis = row.launch_at !== null ? 'launch' : row.created_at !== null ? 'token' : null;
   return { address: row.token, chain: row.chain, symbol: row.symbol, name: row.name, source: 'AVE', marketProvider: 'AVE',
+    // A token response may advertise a pool route, but it does not bind the
+    // pool's target token, timestamps or market facts. Only pairMarket can
+    // create verified pool evidence after checking the pair response.
+    ...(row.main_pair ? { pairAddress: row.main_pair } : {}),
     price: row.current_price_usd, market_cap: row.market_cap, holder_count: row.holders, tvl: row.tvl,
     marketCapSourceUpdatedAt: sampledAt, marketCapCapturedAt: capturedAt, marketCapExpiresAt: expiresAt,
     // These are first-party fields from AVE's trending/token response. They
@@ -671,8 +686,9 @@ export class AveClient {
         this.#alive(job); diagnostic.httpStatus = response.status;
         await this.#httpError(response, diagnostic, controller); const raw = await this.#body(response); this.#alive(job);
         if (controller.signal.aborted) throw fail('ABORTED', 499);
-        diagnostic.category = 'ok';
-        return JSON.parse(JSON.stringify(raw, (_, value) => typeof value === 'string' ? value.split(key).join('[已移除凭证]') : value));
+        // HTTP/JSON completion is not yet a validated market response. Keep
+        // this exact job's diagnostic attached through the schema check.
+        return { raw: JSON.parse(JSON.stringify(raw, (_, value) => typeof value === 'string' ? value.split(key).join('[已移除凭证]') : value)), diagnostic };
       } finally {
         diagnostic.durationMs = Math.max(0, this.#now() - startedAt);
         if (timedOut) diagnostic.category = 'timeout';
@@ -700,8 +716,12 @@ export class AveClient {
       kind === 'pair' ? '/v2/pairs/' + ca + '-' + AVE_CHAINS[chain] :
       '/v2/klines/token/' + ca + '-' + AVE_CHAINS[chain] + '?interval=1&limit=60';
     if (range) path += '&from_time=' + range.from / 1000 + '&to_time=' + range.to / 1000;
-    const raw = await this.#network(job, path, kind, chain), capturedAt = this.#now(); this.#alive(job);
-    const parsed = kind === 'trending' ? parseTrending(raw, chain) : kind === 'details' ? parseDetails(raw, chain, ca) : kind === 'pair' ? parsePair(raw, chain, ca) : parseKlines(raw, chain, ca, capturedAt, range?.from, range?.to);
+    const { raw, diagnostic } = await this.#network(job, path, kind, chain), capturedAt = this.#now(); this.#alive(job);
+    let parsed;
+    try {
+      parsed = kind === 'trending' ? parseTrending(raw, chain) : kind === 'details' ? parseDetails(raw, chain, ca) : kind === 'pair' ? parsePair(raw, chain, ca) : parseKlines(raw, chain, ca, capturedAt, range?.from, range?.to);
+    } catch (error) { diagnostic.category = 'schema'; throw error; }
+    diagnostic.category = 'ok';
     // Cached reads never reach this point. During recovery, trending is the
     // only permitted canary. This also lets a prior details/pair 429 recover
     // without deadlocking behind the non-trending safety gate.
@@ -857,9 +877,25 @@ export class AveClient {
       // Recovery starts with one real head-list success, never a cached read.
       // Decide before the request so its success cannot unlock a burst here.
       const recovery = recovering(this.#budget?.rateControl), onlyHead = headOnly(this.#budget?.rateControl);
-      const rotation = this.#rotateTrendingPages ? this.#trendingPages.get(chain) || { page: 0, tail: 1 } : { page: 0, tail: 1 };
-      let page = rotation.page;
-      const result = await this.trending(chain, { ...options, page });
+      const rotation = this.#rotateTrendingPages
+        ? this.#trendingPages.get(chain) || { page: 0, tail: 1, headStreak: 0 }
+        : { page: 0, tail: 1, headStreak: 0 };
+      // A tail-page failure must not pin every recovery canary to that tail.
+      // Keep its cursor parked until the full healthy window has completed.
+      let page = onlyHead ? 0 : rotation.page;
+      let result;
+      try { result = await this.trending(chain, { ...options, page }); }
+      catch (error) {
+        if (this.#rotateTrendingPages && page > 0 && !onlyHead && epoch === this.keyEpoch
+          && TRENDING_TAIL_FAILURE_CODES.has(error?.code)) {
+          // A malformed/unavailable optional tail must not starve the head or
+          // monopolize every later tail turn. First require a successful head
+          // round, then try the other bounded tail slot. Never retry inside
+          // this round, synthesize a success, or alter provider cooldown/CU.
+          this.#trendingPages.set(chain, { ...rotation, page: 0, tail: page === 1 ? 2 : 1, headStreak: 0 });
+        }
+        throw error;
+      }
       const rows = result.rows.map(row => marketRow(row, result.capturedAt, this.#now()));
       const inScope = row => row.market_cap === null || row.market_cap >= 10000 && row.market_cap <= 150000;
       // AVE documents paginated trending, not an unfiltered new-token feed.
@@ -889,7 +925,7 @@ export class AveClient {
         const routeKey = chain + ':' + row.address, route = this.#routes.get(routeKey);
         if (route && route.until <= this.#now()) this.#routes.delete(routeKey);
         else if (route?.pairs?.length) rows[index] = { ...rows[index], pairs: clone(route.pairs) };
-        if (old?.pairAddress && this.#now() - old.capturedAt <= ENRICHMENT_DEFER_MS) {
+        if (old?.poolEvidence && old.pairAddress && this.#now() - old.capturedAt <= ENRICHMENT_DEFER_MS) {
           rows[index] = { ...clone(old), stale: old.stale || this.#now() >= old.expiresAt };
         }
       }
@@ -947,7 +983,7 @@ export class AveClient {
             try {
               const pair = await this.pairDetails(chain, selectedPair.pair.pair, options);
               const enriched = pairMarket(detailRow, pair, this.#now());
-              if (enriched.pairAddress) {
+              if (enriched !== detailRow && enriched.poolEvidence) {
                 rows[index] = enriched; enrichment.enriched++;
                 this.#finishPairAttempt(chain, row.address, selectedPair.index, true);
                 lastError = null; break;
@@ -959,10 +995,10 @@ export class AveClient {
               if (!PAIR_FALLBACK_CODES.has(error.code)) throw error;
             }
           }
-          if (!rows[index].pairAddress && lastError) throw lastError;
+          if (!rows[index].poolEvidence && lastError) throw lastError;
         } catch (error) {
           if (['AVE_CHANGED', 'AVE_ABORTED', 'AVE_DISABLED', 'AVE_CONFIG'].includes(error.code)) throw error;
-          if (rows[index].pairAddress) rows[index] = { ...rows[index], stale: true };
+          if (rows[index].poolEvidence) rows[index] = { ...rows[index], stale: true };
           enrichment.complete = false;
           if (['AVE_DISCOVERY_RESERVE', 'AVE_HOURLY_BUDGET', 'AVE_TOTAL_BUDGET'].includes(error.code)) {
             enrichment.pausedCode = error.code; enrichment.pausedUntil = error.retryAt ?? null; break;
@@ -978,8 +1014,10 @@ export class AveClient {
       enrichment.complete = !enrichment.pausedCode && enrichment.errors.length === 0 && rows
         .filter(inScope).every(discoveryFactsComplete);
       if (!pauseAfterPage && !onlyHead) this.#cursors.set(chain, pool.length ? (start + Math.max(1, walked)) % pool.length : 0);
-      if (this.#rotateTrendingPages) {
+      if (this.#rotateTrendingPages && !onlyHead && !result.cacheHit) {
         let tail = rotation.tail >= 1 && rotation.tail <= 2 ? rotation.tail : 1;
+        let headStreak = Number.isInteger(rotation.headStreak) && rotation.headStreak >= 0
+          ? rotation.headStreak : 0;
         const seenReady = rotation.seenReady instanceof Set ? rotation.seenReady : new Set();
         // Decide the next paid page from the same safety screen used by the
         // visible AVE shortlist. Merely having many rows in the market-cap
@@ -994,13 +1032,17 @@ export class AveClient {
         while (seenReady.size > ROTATION_SEEN_LIMIT) seenReady.delete(seenReady.values().next().value);
         let nextPage = 0;
         if (page === 0) {
+          headStreak++;
           const hasTail = Number.isInteger(result.nextPage) && result.nextPage > 0;
-          if (hasTail && novelReady.length < ROTATION_READY_TARGET) nextPage = tail;
+          // Novelty earns one extra head refresh, never indefinite priority.
+          // This changes only page choice; each round still buys one request.
+          if (hasTail && (novelReady.length < ROTATION_READY_TARGET || headStreak >= ROTATION_MAX_HEAD_STREAK)) nextPage = tail;
         } else {
+          headStreak = 0;
           tail = Number.isInteger(pageResult.nextPage) && pageResult.nextPage > page && pageResult.nextPage <= 2
             ? pageResult.nextPage : 1;
         }
-        this.#trendingPages.set(chain, { page: nextPage, tail, seenReady });
+        this.#trendingPages.set(chain, { page: nextPage, tail, headStreak, seenReady });
       }
       const checkedAt = Math.max(result.capturedAt, pageResult.capturedAt, ...rows.map(row => row.capturedAt || 0));
       const health = { provider: 'AVE', complete: enrichment.errors.length === 0,
@@ -1072,7 +1114,7 @@ export class AveClient {
         try {
           const pair = await this.pairDetails(chain, selectedPair.pair.pair, { signal });
           const enriched = pairMarket(partial.info, pair, this.#now());
-          if (enriched.pairAddress) {
+          if (enriched !== partial.info && enriched.poolEvidence) {
             partial.info = enriched; partial.pool = { liquidity: enriched.liquidity, pairAddress: enriched.pairAddress, capturedAt: enriched.capturedAt, sourceUpdatedAt: enriched.sourceUpdatedAt };
             endpoints.pool = { ok: true, state: 'ok', capturedAt: enriched.capturedAt, sourceUpdatedAt: enriched.sourceUpdatedAt };
             this.#finishPairAttempt(chain, ca, selectedPair.index, true);

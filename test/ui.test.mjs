@@ -8,6 +8,73 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const html = fs.readFileSync(path.join(here, '..', 'public', 'index.html'), 'utf8');
 
+function liveRefreshHarness(fetch) {
+  const previous = { chain: 'bsc', rows: [{ symbol: 'PREVIOUS' }] };
+  const context = { fetch, AbortSignal, document: { hidden: false },
+    renderLive() {}, activeChain: data => data.activeChain,
+    liveEnabled: true, liveBusy: false, serviceOnline: true, liveRefreshErrorChain: '',
+    lastData: { activeChain: 'bsc' }, viewChain: 'bsc', liveData: previous };
+  const start = html.indexOf('async function refreshLive()'), end = html.indexOf('function render(data, forceCandidates)', start);
+  assert.ok(start >= 0 && end > start);
+  vm.runInNewContext(html.slice(start, end), context);
+  return { context, previous };
+}
+
+test('candidate timeout, HTTP and payload failures preserve data and do not mark a healthy local service offline', async () => {
+  const failures = [
+    async () => { throw new DOMException('timed out', 'TimeoutError'); },
+    async () => { throw new TypeError('Failed to fetch'); },
+    async () => ({ ok: false }),
+    async () => ({ ok: true, json: async () => { throw new SyntaxError('invalid json'); } }),
+    async () => ({ ok: true, json: async () => ({ chain: 'sol', rows: [] }) }),
+    async () => ({ ok: true, json: async () => ({ chain: 'bsc', rows: null }) }),
+  ];
+  for (const fetch of failures) {
+    const { context, previous } = liveRefreshHarness(fetch);
+    await context.refreshLive();
+    assert.equal(context.liveRefreshErrorChain, 'bsc');
+    assert.equal(context.serviceOnline, true);
+    assert.equal(context.liveData, previous);
+    assert.equal(context.liveBusy, false);
+    const recovered = { chain: 'bsc', rows: [{ symbol: 'RECOVERED' }] };
+    context.fetch = async () => ({ ok: true, json: async () => recovered });
+    await context.refreshLive();
+    assert.equal(context.liveRefreshErrorChain, '');
+    assert.equal(context.liveData, recovered);
+  }
+});
+
+test('an old-chain response or timeout cannot overwrite the newly selected chain or its connection state', async () => {
+  for (const fail of [false, true]) {
+    let settle;
+    const { context } = liveRefreshHarness(() => new Promise((resolve, reject) => {
+      settle = () => fail ? reject(new Error('old chain timeout'))
+        : resolve({ ok: true, json: async () => ({ chain: 'bsc', rows: [] }) });
+    }));
+    const pending = context.refreshLive();
+    context.viewChain = 'sol';
+    const selected = { chain: 'sol', rows: [{ symbol: 'SOL' }] };
+    context.liveData = selected;
+    settle();
+    await pending;
+    assert.equal(context.liveData, selected);
+    assert.equal(context.liveRefreshErrorChain, '');
+    assert.equal(context.serviceOnline, true);
+    assert.equal(context.liveBusy, false);
+  }
+});
+
+test('performance and event panels are removed together with their render hooks; scan status and voice remain', () => {
+  assert.doesNotMatch(html, /data-i18n="(?:outcomeTitle|eventsTitle)"/);
+  assert.doesNotMatch(html, /id="(?:outcome[^\"]*|events|cycle|requestSummary|eventHistory[^\"]*)"/);
+  assert.doesNotMatch(html, /\b(?:eventOverview|renderEvents|renderOutcomes)\s*\(/);
+  assert.match(html, /id="livePanel"/);
+  assert.match(html, /id="voiceEnable"/);
+  assert.match(html, /id="providerState"/);
+  assert.match(html, /renderTelemetry\(\)/);
+  assert.match(html, /renderLive\(\)/);
+});
+
 test('AVE opens token chart/trading with the author referral and never substitutes the pool or source URL', () => {
   const start = html.indexOf('const AVE_INVITE_URL =');
   const end = html.indexOf('function candidateRow', start);
@@ -181,7 +248,14 @@ test('顶部链标签可直接加入或切换扫描，且始终最多三条', as
     const button = adding.elements.chainSwitcher.innerHTML.match(new RegExp('<button[^>]*data-chain="' + chain + '"[^>]*>'))?.[0];
     assert.ok(button, chain + ' 应显示');
     assert.doesNotMatch(button, /\sdisabled(?:\s|>)/, chain + ' 应可点击');
+    assert.match(button, new RegExp('title="' + (chain === 'bsc' ? 'chainPollingTitle' : 'chainJoinTitle') + '"'));
+    assert.match(button, /aria-label=/);
   }
+  assert.equal((adding.elements.chainSwitcher.innerHTML.match(/>chainPollingBadge<\/span>/g) || []).length, 1,
+    'only enabled chains show a polling badge; selection is not evidence of health');
+  adding.context.renderChainSwitcher(null);
+  assert.doesNotMatch(adding.elements.chainSwitcher.innerHTML, /chainPollingBadge/);
+  assert.match(adding.elements.chainSwitcher.innerHTML, /chainOfflineHint/);
   await adding.context.switchActiveChain('base');
   assert.deepEqual(JSON.parse(JSON.stringify(adding.requests)), [{ url: '/api/scan-chains', body: { chains: ['bsc', 'base'] } }]);
   assert.equal(adding.context.viewChain, 'base');
@@ -217,6 +291,56 @@ test('AVE 健康状态使用短句，限频仍显示恢复时间', () => {
     aveMarket: { pauseCode: 'AVE_RATE_LIMITED', nextAllowedAt: now + 60_000 } });
   assert.match(limited.detail, /aveRetryAt/);
   assert.match(limited.detail, /clock:/);
+});
+
+test('共享免费调度显示选中链的最早尝试，不把全局或空时间当每链倒计时', () => {
+  const start = html.indexOf('function schedulePresentation('), end = html.indexOf('function renderScreening(', start);
+  const context = { t: (key, args) => key + (args ? ':' + JSON.stringify(args) : ''), formatDuration: String };
+  vm.runInNewContext(html.slice(start, end) + ';this.show=schedulePresentation;', context);
+  const at = 1_800_000_000_000;
+  const data = { nextCycleAt: at + 300000, scheduler: { scope: 'shared-provider', reason: 'shared_cadence',
+    nextSharedAttemptAt: at + 300000, selectedNextAttemptAt: at + 900000 } };
+  assert.match(context.show(data, at).title, /900000/);
+  assert.equal(context.show(data, at).detail, 'attemptEstimate');
+  data.scheduler.selectedNextAttemptAt = null;
+  assert.equal(context.show(data, at).title, 'waitingSchedule');
+  for (const [reason, title] of Object.entries({ disabled: 'scanDisabled', recovery_chain_deferred: 'chainDeferred',
+    auth_required: 'scanNeedsAction', manual_reset_required: 'scanNeedsAction', scanning: 'statusScanning', stopped: 'waitingSchedule' })) {
+    data.scheduler.reason = reason;
+    assert.equal(context.show(data, at).title, title);
+  }
+  assert.equal(context.show({}, at), null, 'old snapshots keep a separate compatibility path');
+});
+
+test('筛选原因默认折叠，缺失统计不伪造零，行情初筛不标成安全审计', () => {
+  const start = html.indexOf('function renderScreening('), end = html.indexOf('function renderTelemetry(', start);
+  const elements = Object.fromEntries(['screeningDetails', 'screeningCounts', 'screeningChecked'].map(id => [id, {}]));
+  const context = { byId: id => elements[id], number: value => Number(value) || 0, formatCount: String, formatClock: String,
+    t: (key, args) => key + (args ? ':' + JSON.stringify(args) : '') };
+  vm.runInNewContext(html.slice(start, end) + ';this.show=renderScreening;', context);
+  context.show({}); assert.equal(elements.screeningDetails.hidden, true);
+  context.show({ screening: { countsAvailable: true, received: 100, marketQualified: 2, filtered: 98,
+    checkedAt: 1234, reasonCounts: { activity: 20, missing_market: 30, known_risk: 0 } } });
+  assert.equal(elements.screeningDetails.hidden, false);
+  assert.match(elements.screeningCounts.textContent, /filterMissing 30/);
+  assert.match(elements.screeningCounts.textContent, /filterActivity 20/);
+  assert.doesNotMatch(elements.screeningCounts.textContent, /filterRisk/);
+  assert.match(elements.screeningChecked.textContent, /1234/);
+  assert.match(html, /<details id="screeningDetails"[^>]*hidden>/);
+  assert.doesNotMatch(html, /<details id="screeningDetails"[^>]*\bopen\b/);
+  assert.match(html, /liveEligible: \['初筛 · 未核验'/);
+  assert.match(html, /\['AUTH_REQUIRED', 'AVE_AUTH_REQUIRED'\]\.includes\(data\.status\)/);
+});
+
+test('候选空池区分过期行情和当前筛选失败，不能把缓存过期误写成风险排除', () => {
+  const start = html.indexOf('function liveEmptyMessage('), end = html.indexOf('function renderLive(', start);
+  const context = { t: value => value };
+  vm.runInNewContext(html.slice(start, end) + ';this.show=liveEmptyMessage;', context);
+  const source = { lastSuccessAt: 1234, receivedCount: 100, diagnostics: { outsideRange: 0 } };
+  assert.equal(context.show(source, '', true, 'liveReady'), 'liveStale');
+  assert.equal(context.show(source, '', false, 'liveReady'), 'liveExcluded');
+  assert.equal(context.show(source, 'query', true, 'liveReady'), 'liveFilteredEmpty');
+  assert.equal(context.show(null, '', true, 'aveApiNetwork'), 'aveApiNetwork');
 });
 
 test('页面不再公开展示严格筛选规则', () => {

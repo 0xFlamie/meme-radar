@@ -7,15 +7,13 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
-import { pathToFileURL, fileURLToPath } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { setTimeout as pause } from 'node:timers/promises';
 import { deflateRawSync } from 'node:zlib';
-import { archiveFiles, compareVersions, releaseAssetName, UPDATE_LIMITS } from '../../src/updater.mjs';
+import { archiveFiles, compareVersions, createUpdater, releaseAssetName, UPDATE_LIMITS } from '../../src/updater.mjs';
 
 const exec = promisify(execFile);
-const here = path.dirname(fileURLToPath(import.meta.url));
-const sourceRoot = path.resolve(here, '../..');
 const repository = 'nhovongoc0-max/meme-radar';
 const api = `https://api.github.com/repos/${repository}/releases`;
 const download = `https://github.com/${repository}/releases/download/`;
@@ -206,29 +204,22 @@ async function runDriver(configFile) {
   child.stdout.on('data', data => { stdout += data; }); child.stderr.on('data', data => { stderr += data; });
   const code = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
-      child.kill('SIGKILL'); reject(new Error('旧版 createUpdater 驱动 180 秒超时'));
+      child.kill('SIGKILL'); reject(new Error('迁移兼容测试驱动 180 秒超时'));
     }, 180_000);
     timer.unref();
     child.once('error', error => { clearTimeout(timer); reject(error); });
     child.once('exit', value => { clearTimeout(timer); resolve(value); });
   });
-  if (code !== 0) fail(`旧版 createUpdater 驱动失败 (exit ${code})\n${stderr || stdout}`);
+  if (code !== 0) fail(`迁移兼容测试驱动失败 (exit ${code})\n${stderr || stdout}`);
   let result;
-  try { result = JSON.parse(stdout.trim()); } catch { fail(`旧版 createUpdater 未返回有效结果：${stdout || stderr}`); }
-  if (result.phase !== 'handoff' || result.restartRequired !== true) fail('旧版 createUpdater 未进入真实交接阶段');
+  try { result = JSON.parse(stdout.trim()); } catch { fail(`迁移兼容测试未返回有效结果：${stdout || stderr}`); }
+  if (result.phase !== 'handoff' || result.restartRequired !== true) fail('迁移兼容测试未进入真实交接阶段');
 }
 
-function prepareInstall({ parent, oldArchive, oldFiles, platform, nodeModules }) {
+function prepareInstall({ parent, oldArchive, oldFiles }) {
   const root = path.join(parent, 'MemeRadar-OpenSource');
   writeArchiveTree(root, oldFiles);
   assert.equal(fs.existsSync(path.join(root, '.git')), false, '旧版安装不得含 .git');
-  if (platform === 'darwin') {
-    const modules = path.resolve(nodeModules || path.join(sourceRoot, 'node_modules'));
-    if (!fs.existsSync(path.join(modules, 'gmgn-cli', 'package.json'))) fail('macOS 演练需要 --node-modules 指向 npm ci 后的依赖目录');
-    fs.cpSync(modules, path.join(root, 'node_modules'), {
-      recursive: true, dereference: false, verbatimSymlinks: true, errorOnExist: true,
-    });
-  }
   const marker = { schema: 1, id: crypto.randomUUID(), oldArchiveSha256: sha256(oldArchive) };
   fs.mkdirSync(path.join(root, 'state'), { mode: 0o700 });
   fs.writeFileSync(path.join(root, 'state/package-update-e2e-marker.json'), `${JSON.stringify(marker)}\n`, { mode: 0o600 });
@@ -236,9 +227,9 @@ function prepareInstall({ parent, oldArchive, oldFiles, platform, nodeModules })
 }
 
 async function exerciseScenario({ temporary, label, oldArchive, oldFiles, oldVersion, candidateArchive, candidateVersion, candidateChecksums,
-  oldChecksums, platform, arch, nodeModules, expectRollback }) {
+  oldChecksums, platform, arch, expectRollback }) {
   const parent = path.join(temporary, label); fs.mkdirSync(parent, { mode: 0o700 });
-  const { root, marker } = prepareInstall({ parent, oldArchive, oldFiles, platform, nodeModules });
+  const { root, marker } = prepareInstall({ parent, oldArchive, oldFiles });
   const oldPath = path.join(parent, path.basename(releaseAssetName(oldVersion, platform, arch)));
   const candidateName = releaseAssetName(candidateVersion, platform, arch), candidatePath = path.join(parent, candidateName);
   const checksumsPath = path.join(parent, `SHA256SUMS-${candidateVersion}.txt`);
@@ -288,7 +279,7 @@ export function parseCli(argv) {
   const output = {};
   for (let index = 0; index < argv.length; index += 2) {
     const flag = argv[index], value = argv[index + 1];
-    if (!value || !['--old', '--candidate', '--checksums', '--sha256', '--old-checksums', '--old-sha256', '--platform', '--arch', '--node-modules'].includes(flag)
+    if (!value || !['--old', '--candidate', '--checksums', '--sha256', '--old-checksums', '--old-sha256', '--platform', '--arch'].includes(flag)
       || Object.hasOwn(output, flag)) fail('用法：node scripts/testing/package-update-e2e.mjs --old <v0.1.9 ZIP> --candidate <候选 ZIP> (--checksums <SHA256SUMS> | --sha256 <hash>) [--old-checksums <SHA256SUMS> | --old-sha256 <hash>]');
     output[flag] = value;
   }
@@ -301,7 +292,7 @@ export function parseCli(argv) {
   return {
     old: output['--old'], candidate: output['--candidate'], checksums: output['--checksums'], sha256: output['--sha256'],
     oldChecksums: output['--old-checksums'], oldSha256: output['--old-sha256'], platform: output['--platform'] || process.platform,
-    arch: output['--arch'] || process.arch, nodeModules: output['--node-modules'],
+    arch: output['--arch'] || process.arch,
   };
 }
 
@@ -343,10 +334,10 @@ export async function runPackageUpdateE2E(options) {
   try {
     const success = await exerciseScenario({ temporary, label: 'success', oldArchive, oldFiles: oldParsed.files, oldVersion,
       candidateArchive, candidateVersion, candidateChecksums, oldChecksums,
-      platform, arch, nodeModules: options.nodeModules, expectRollback: false });
+      platform, arch, expectRollback: false });
     const rollback = await exerciseScenario({ temporary, label: 'rollback', oldArchive, oldFiles: oldParsed.files, oldVersion,
       candidateArchive: brokenArchive, candidateVersion, candidateChecksums: brokenChecksums, oldChecksums,
-      platform, arch, nodeModules: options.nodeModules, expectRollback: true });
+      platform, arch, expectRollback: true });
     return { oldVersion, candidateVersion, platform, arch, success, rollback };
   } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
 }
@@ -381,10 +372,13 @@ async function driver(configFile) {
     if (value?.location) return new Response(null, { status: 302, headers: { Location: value.location } });
     return Buffer.isBuffer(value) ? new Response(value) : Response.json(value);
   };
-  const module = await import(`${pathToFileURL(path.join(config.root, 'src/updater.mjs')).href}?e2e=${crypto.randomUUID()}`);
-  const updater = module.createUpdater({ root: config.root, port: config.port, platform: config.platform, arch: config.arch, fetchImpl });
+  // This developer-only compatibility test uses the current migration code on
+  // an untouched, checksum-verified historical baseline. It does not claim the
+  // old application's installer can cross a dependency-removal boundary, nor
+  // enable installation in the current application's download-only UI.
+  const updater = createUpdater({ root: config.root, port: config.port, platform: config.platform, arch: config.arch, fetchImpl });
   const checked = await updater.check();
-  if (checked.phase !== 'available' || checked.availableVersion !== config.candidateVersion) fail('旧版更新器未识别候选版本');
+  if (checked.phase !== 'available' || checked.availableVersion !== config.candidateVersion) fail('迁移兼容测试未识别候选版本');
   const result = await updater.install({ version: config.candidateVersion, confirm: 'INSTALL_UPDATE' });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
@@ -393,11 +387,11 @@ async function cli() {
   try {
     if (process.argv[2] === '--driver') return await driver(process.argv[3]);
     const result = await runPackageUpdateE2E(parseCli(process.argv.slice(2)));
-    console.log(`一键更新真实演练通过：v${result.oldVersion} → v${result.candidateVersion} (${result.platform}/${result.arch})`);
+    console.log(`包级迁移兼容演练通过：v${result.oldVersion} → v${result.candidateVersion} (${result.platform}/${result.arch})`);
     console.log('升级完成、/health 版本、state 保留、previous 备份、启动失败回滚均已验证。');
   } catch (error) {
     const code = typeof error?.code === 'string' ? ` [${error.code}]` : '';
-    console.error(`一键更新真实演练失败${code}：${error.message}`);
+    console.error(`包级迁移兼容演练失败${code}：${error.message}`);
     if (process.argv[2] === '--driver' && error?.stack) console.error(error.stack);
     process.exitCode = 1;
   }

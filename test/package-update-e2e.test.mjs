@@ -56,7 +56,7 @@ test('CLI requires old/candidate artifacts plus exactly one trusted SHA-256 sour
   assert.deepEqual(parseCli(['--old', 'old.zip', '--candidate', 'new.zip', '--sha256', 'a'.repeat(64),
     '--old-sha256', 'b'.repeat(64), '--platform', 'darwin']), {
     old: 'old.zip', candidate: 'new.zip', checksums: undefined, sha256: 'a'.repeat(64), oldChecksums: undefined,
-    oldSha256: 'b'.repeat(64), platform: 'darwin', arch: process.arch, nodeModules: undefined,
+    oldSha256: 'b'.repeat(64), platform: 'darwin', arch: process.arch,
   });
   assert.throws(() => parseCli(['--old', 'old.zip', '--candidate', 'new.zip']));
   assert.throws(() => parseCli(['--old', 'old.zip', '--candidate', 'new.zip', '--sha256', 'a'.repeat(64)]));
@@ -64,6 +64,8 @@ test('CLI requires old/candidate artifacts plus exactly one trusted SHA-256 sour
     '--checksums', 'sums.txt', '--old-sha256', 'b'.repeat(64)]));
   assert.throws(() => parseCli(['--old', 'old.zip', '--candidate', 'new.zip', '--sha256', 'a'.repeat(64),
     '--old-sha256', 'b'.repeat(64), '--old-checksums', 'old-sums.txt']));
+  assert.throws(() => parseCli(['--old', 'old.zip', '--candidate', 'new.zip', '--sha256', 'a'.repeat(64),
+    '--old-sha256', 'b'.repeat(64), '--node-modules', 'obsolete-dependencies']));
   assert.throws(() => parseCli(['--old', 'old.zip', '--candidate', 'new.zip', '--sha256', sha256('fixture'),
     '--old-sha256', 'b'.repeat(64), '--unknown', 'x']));
 });

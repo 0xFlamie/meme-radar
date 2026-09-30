@@ -9,11 +9,13 @@ import { createUpdater, archiveFiles, compareVersions, releaseAssetName, verifyL
 
 const sha = data => crypto.createHash('sha256').update(data).digest('hex');
 const repo = 'nhovongoc0-max/meme-radar', current = '0.1.8', target = '0.1.9';
-const pkg = (version, dependency = '1.5.7') => JSON.stringify({ name: 'meme-radar-open-source', version, private: true, dependencies: { 'gmgn-cli': dependency } });
-const lock = (version, dependency = '1.5.7') => JSON.stringify({ name: 'meme-radar-open-source', version, lockfileVersion: 3, requires: true,
-  packages: { '': { name: 'meme-radar-open-source', version, dependencies: { 'gmgn-cli': dependency } },
-    'node_modules/gmgn-cli': { version: dependency } } });
-const files = (version, dependency = '1.5.7') => ({ 'package.json': pkg(version, dependency), 'package-lock.json': lock(version, dependency), 'src/main.mjs': `// fixture ${version}`,
+const pkg = (version, dependency) => JSON.stringify({ name: 'meme-radar-open-source', version, private: true,
+  ...(dependency ? { dependencies: { 'obsolete-fixture': dependency } } : {}) });
+const lock = (version, dependency) => JSON.stringify({ name: 'meme-radar-open-source', version, lockfileVersion: 3, requires: true,
+  packages: { '': { name: 'meme-radar-open-source', version,
+    ...(dependency ? { dependencies: { 'obsolete-fixture': dependency } } : {}) },
+  ...(dependency ? { 'node_modules/obsolete-fixture': { version: dependency } } : {}) } });
+const files = (version, dependency) => ({ 'package.json': pkg(version, dependency), 'package-lock.json': lock(version, dependency), 'src/main.mjs': `// fixture ${version}`,
   'src/updater.mjs': '// updater fixture', 'scripts/update-worker.mjs': '// worker fixture', 'scripts/supervise.mjs': '// supervisor fixture', 'public/index.html': '<h1>Fixture</h1>' });
 function zip(input, { platform = 'darwin', modes = {}, names = {} } = {}) {
   const prefix = platform === 'darwin' ? 'MemeRadar-OpenSource-macOS/' : 'MemeRadar-OpenSource-Windows/';
@@ -36,7 +38,7 @@ function writeTree(root, values) {
 function fixture(t) {
   const parent = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'community-update-test-')), root = path.join(parent, 'radar');
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
-  writeTree(root, files(current)); writeTree(root, { 'node_modules/gmgn-cli/package.json': '{"version":"1.5.7"}', 'state/gmgn-api-key': 'PUBLIC_SYNTHETIC_KEY', 'state/preferences.json': '{"note":"synthetic"}' });
+  writeTree(root, files(current)); writeTree(root, { 'state/ave-credentials.json': 'PUBLIC_SYNTHETIC_KEY', 'state/preferences.json': '{"note":"synthetic"}' });
   return { parent, root };
 }
 function upstream({ override, versions = { [current]: files(current), [target]: files(target) } } = {}) {
@@ -102,7 +104,7 @@ test('source checkout is reported blocked even when an official higher release e
   const updater = createUpdater({ root: f.root, platform: 'darwin', arch: 'arm64', fetchImpl: network.fetchImpl });
   const result = await updater.check(); assert.equal(result.phase, 'blocked'); assert.equal(result.code, 'UPDATE_LOCAL'); assert.equal(result.canInstall, false); assert.equal(result.availableVersion, target);
   await assert.rejects(updater.install({ version: target, confirm: 'INSTALL_UPDATE' }), { code: 'UPDATE_LOCAL' });
-  assert.equal(network.calls.length, 1); assert.equal(fs.readFileSync(path.join(f.root, 'state/gmgn-api-key'), 'utf8'), 'PUBLIC_SYNTHETIC_KEY');
+  assert.equal(network.calls.length, 1); assert.equal(fs.readFileSync(path.join(f.root, 'state/ave-credentials.json'), 'utf8'), 'PUBLIC_SYNTHETIC_KEY');
 });
 test('metadata validation rejects prerelease, alternate host, missing digest agreement and same-version install', async t => {
   for (const transform of [value => { value.prerelease = true; }, value => { value.assets[0].browser_download_url = 'https://evil.invalid/update.zip'; }, value => { value.assets.push(value.assets[0]); }]) {
@@ -124,9 +126,11 @@ test('install verifies both release checksums, preserves live state, stages priv
   const plan = JSON.parse(fs.readFileSync(calls[0].args[1], 'utf8'));
   assert.equal(plan.version, target); assert.equal(plan.parentPid, process.pid);
   assert.equal(fs.existsSync(path.join(plan.work, 'next/state')), false, 'Live state is not copied before shutdown');
+  assert.equal(fs.existsSync(path.join(plan.work, 'next/node_modules')), false);
+  assert.equal(fs.existsSync(path.join(f.root, 'node_modules')), false, 'No installed dependencies are needed for migration');
   assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, 'package.json'))).version, current);
   assert.ok(!JSON.stringify(result).includes(f.root)); assert.ok(!JSON.stringify(result).includes('PUBLIC_SYNTHETIC_KEY'));
-  assert.equal(calls[0].options.env.GMGN_API_KEY, undefined); assert.equal(calls[0].options.env.NODE_OPTIONS, undefined);
+  assert.equal(calls[0].options.env.AVE_API_KEY, undefined); assert.equal(calls[0].options.env.NODE_OPTIONS, undefined);
   assert.equal(fs.statSync(plan.work).mode & 0o777, 0o700);
   await assert.rejects(updater.install({ version: target, confirm: 'INSTALL_UPDATE' }), { code: 'UPDATE_BUSY' });
 });
@@ -141,13 +145,38 @@ test('corrupt digest, redirect to arbitrary host and changed dependencies fail w
     const updater = createUpdater({ root: f.root, platform: 'darwin', arch: 'arm64', fetchImpl: network.fetchImpl, spawnImpl: () => assert.fail('must not hand off') });
     await assert.rejects(updater.install({ version: target, confirm: 'INSTALL_UPDATE' }));
     assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, 'package.json'))).version, current);
-    assert.equal(fs.readFileSync(path.join(f.root, 'state/gmgn-api-key'), 'utf8'), 'PUBLIC_SYNTHETIC_KEY');
+    assert.equal(fs.readFileSync(path.join(f.root, 'state/ave-credentials.json'), 'utf8'), 'PUBLIC_SYNTHETIC_KEY');
+  }
+});
+test('verified historical dependency installations migrate to zero dependencies without deleting legacy private state', async t => {
+  const f = fixture(t), oldFiles = files(current, '1.0.0'), calls = [];
+  writeTree(f.root, oldFiles);
+  const preserved = {
+    // Synthetic legacy filenames are deliberate: data preservation is not an
+    // active integration or permission to load the old credentials.
+    'state/gmgn-api-key': 'SYNTHETIC_UNUSED_LEGACY_KEY',
+    'state/ave-budget.json': '{"totalUsed":12345,"used":123,"hourUsed":12}',
+    'state/radar.json': '{"outcomes":[{"id":"old-observation"}],"riskExclusions":{"saved":true}}',
+  };
+  writeTree(f.root, { ...preserved, 'node_modules/obsolete-fixture/package.json': '{"version":"1.0.0"}' });
+  const network = upstream({ versions: { [current]: oldFiles, [target]: files(target) } });
+  const updater = createUpdater({ root: f.root, platform: 'darwin', arch: 'arm64', fetchImpl: network.fetchImpl, spawnImpl: mockSpawn(calls) });
+  await updater.install({ version: target, confirm: 'INSTALL_UPDATE' });
+  const planFile = calls[0].args[1], plan = JSON.parse(fs.readFileSync(planFile, 'utf8'));
+  assert.equal(fs.existsSync(path.join(plan.work, 'next/node_modules')), false);
+  await runUpdateWorker(planFile, { isAlive: () => false, portFreeImpl: async () => true, pause: async () => {},
+    spawnImpl: mockSpawn(), healthImpl: async () => true });
+  assert.equal(fs.existsSync(path.join(f.root, 'node_modules')), false);
+  assert.equal(fs.existsSync(path.join(plan.work, 'previous/node_modules/obsolete-fixture/package.json')), true);
+  for (const [name, value] of Object.entries(preserved)) {
+    assert.equal(fs.readFileSync(path.join(f.root, name), 'utf8'), value);
+    assert.equal(fs.readFileSync(path.join(plan.work, 'previous', name), 'utf8'), value);
   }
 });
 test('copying private state refuses symbolic links and preserves private file permissions', t => {
   const f = fixture(t), out = path.join(f.parent, 'state-copy'); copyTree(path.join(f.root, 'state'), out, { privateData: true });
-  assert.equal(fs.readFileSync(path.join(out, 'gmgn-api-key'), 'utf8'), 'PUBLIC_SYNTHETIC_KEY');
-  assert.equal(fs.statSync(path.join(out, 'gmgn-api-key')).mode & 0o777, 0o600);
+  assert.equal(fs.readFileSync(path.join(out, 'ave-credentials.json'), 'utf8'), 'PUBLIC_SYNTHETIC_KEY');
+  assert.equal(fs.statSync(path.join(out, 'ave-credentials.json')).mode & 0o777, 0o600);
   fs.symlinkSync(path.join(f.root, 'package.json'), path.join(f.root, 'state/not-a-key'));
   assert.throws(() => copyTree(path.join(f.root, 'state'), path.join(f.parent, 'bad-copy'), { privateData: true }));
 });
@@ -164,7 +193,7 @@ test('worker swaps after exit, preserves state and backup, verifies version/inst
   } });
   assert.equal(result.phase, 'complete'); assert.equal(calls.length, 1);
   assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, 'package.json'))).version, target);
-  for (const base of [f.root, path.join(f.work, 'previous')]) assert.equal(fs.readFileSync(path.join(base, 'state/gmgn-api-key'), 'utf8'), 'PUBLIC_SYNTHETIC_KEY');
+  for (const base of [f.root, path.join(f.work, 'previous')]) assert.equal(fs.readFileSync(path.join(base, 'state/ave-credentials.json'), 'utf8'), 'PUBLIC_SYNTHETIC_KEY');
   assert.equal(fs.existsSync(f.lockFile), false);
   const updater = createUpdater({ root: f.root, platform: 'darwin', arch: 'arm64', fetchImpl: async () => assert.fail('no network') });
   assert.equal(updater.snapshot().phase, 'complete'); assert.ok(!JSON.stringify(updater.snapshot()).includes('PUBLIC_SYNTHETIC_KEY'));
@@ -173,7 +202,7 @@ test('failed new startup stops only its own child, restores old code and data, a
   const f = workerFixture(t), calls = [];
   await assert.rejects(runUpdateWorker(f.planFile, { isAlive: () => false, portFreeImpl: async () => true, pause: async () => {}, spawnImpl: mockSpawn(calls), healthImpl: async (_port, _instance, version) => version === current }), { code: 'UPDATE_START' });
   assert.equal(calls.length, 2); assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, 'package.json'))).version, current);
-  assert.equal(fs.readFileSync(path.join(f.root, 'state/gmgn-api-key'), 'utf8'), 'PUBLIC_SYNTHETIC_KEY');
+  assert.equal(fs.readFileSync(path.join(f.root, 'state/ave-credentials.json'), 'utf8'), 'PUBLIC_SYNTHETIC_KEY');
   assert.equal(JSON.parse(fs.readFileSync(path.join(f.work, 'failed-version/package.json'))).version, target);
   const updater = createUpdater({ root: f.root, platform: 'darwin', arch: 'arm64', fetchImpl: async () => assert.fail('no network') });
   assert.equal(updater.snapshot().phase, 'rolled_back');

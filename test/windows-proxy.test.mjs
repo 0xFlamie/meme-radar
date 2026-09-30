@@ -30,6 +30,8 @@ test('portable Windows startup mirrors the effective system proxy without exposi
   assert.equal(env.HTTP_PROXY, 'http://127.0.0.1:7890/');
   assert.equal(env.NO_PROXY, '127.0.0.1,localhost');
   assert.equal(commands[0][0], 'powershell.exe');
+  assert.match(commands[0][1].at(-1), /https:\/\/prod\.ave-api\.com\//);
+  assert.doesNotMatch(commands[0][1].at(-1), /gmgn/i);
 });
 
 test('registry fallback is used when PowerShell proxy discovery is unavailable', () => {

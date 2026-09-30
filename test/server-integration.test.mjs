@@ -21,6 +21,46 @@ function dispatch(server, path, { method = 'POST', body = {}, extraHeaders = {} 
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
+test('status exposes allowlisted shared scheduling and market-only screening without refreshing evidence', async () => {
+  const now = Date.now(), next = now + 600_000, observedAt = now - 120_000;
+  const state = { value: { activeChain: 'bsc', status: 'RUNNING', lastSuccessAt: observedAt,
+    chainStates: { eth: { lastSuccessAt: observedAt, nextCycleAt: now - 1, screening: {
+      checkedAt: observedAt, received: 10, marketQualified: 2, filtered: 8,
+      reasonCounts: { stale: 4, known_risk: 1, rawSecret: 100 }, private: 'not-public'
+    } } } } };
+  const server = createServer({ settings: { ...settings, maxDeepAuditsPerCycle: 0 }, state,
+    controls: { value: { enabledChains: ['bsc', 'eth'], annotations: {} } }, getSchedulerStatus: chain => ({
+      scope: 'shared-provider', sharedIntervalMs: 300000, nominalChainIntervalMs: 600000,
+      eligibleChains: ['bsc', 'eth', 'secret-chain'], selectedChain: chain, queuePosition: 2,
+      nextSharedAttemptAt: now + 300000, selectedNextAttemptAt: next, estimate: 'earliest', reason: 'shared_cadence', private: 'not-public'
+    }) });
+  const { body } = await dispatch(server, '/api/status?chain=eth', { method: 'GET' });
+  assert.equal(body.nextCycleAt, next); assert.equal(body.lastSuccessAt, observedAt);
+  assert.equal(body.scheduler.selectedChain, 'eth'); assert.equal(body.scheduler.sharedIntervalMs, 300000);
+  assert.deepEqual(body.scheduler.eligibleChains, ['bsc', 'eth']); assert.equal(body.scheduler.guaranteed, false);
+  assert.equal(body.screening.mode, 'market_only'); assert.equal(body.screening.securityStatus, 'UNVERIFIED');
+  assert.equal(body.screening.deepAuditEnabled, false); assert.equal(body.screening.checkedAt, observedAt);
+  assert.equal(body.screening.reasonCounts.stale, 4); assert.doesNotMatch(JSON.stringify(body), /not-public|rawSecret|secret-chain/);
+});
+
+test('unpredictable selected-chain turn clears its obsolete timer instead of promising a retry', async () => {
+  const now = Date.now();
+  const server = createServer({ settings, state: { value: { activeChain: 'bsc', chainStates: { robinhood: { nextCycleAt: now - 1 } } } },
+    controls: { value: { enabledChains: ['bsc', 'robinhood'], annotations: {} } },
+    getSchedulerStatus: () => ({ selectedNextAttemptAt: null, estimate: 'unavailable', reason: 'recovery_chain_deferred', eligibleChains: ['bsc'] }) });
+  const { body } = await dispatch(server, '/api/status?chain=robinhood', { method: 'GET' });
+  assert.equal(body.nextCycleAt, 0); assert.equal(body.scheduler.selectedNextAttemptAt, null);
+  assert.equal(body.scheduler.reason, 'recovery_chain_deferred');
+});
+
+test('disabled deep-review endpoint refuses before reading a snapshot or accepting a queue entry', async () => {
+  const server = createServer({ settings: { ...settings, maxDeepAuditsPerCycle: 0 }, state: { value: {} },
+    liveDiscovery: { auditRow() { assert.fail('disabled audit must not read a candidate'); } },
+    enqueueReview() { assert.fail('disabled audit must not enqueue'); } });
+  const result = await dispatch(server, '/api/live-review', { body: { chain: 'bsc', address: '0x' + '1'.repeat(40) } });
+  assert.equal(result.status, 409); assert.deepEqual(result.body, { accepted: false, reason: 'deep_audit_disabled' });
+});
+
 test('selected-chain timers inherit current global AVE cooldown without changing old success time', async () => {
   const now = Date.now(), retry = now + 500000;
   const server = createServer({ settings, state: { value: { activeChain: 'bsc', status: 'RUNNING',
@@ -188,9 +228,10 @@ test('status adds AVE market budget and safe connection fields, fixed health ver
   assert.equal(status.body.aveConnection.executionReady, false); assert.doesNotMatch(JSON.stringify(status), /raw-private-fixture|fingerprint/);
   assert.equal((await dispatch(server, '/health', { method: 'GET' })).body.version, '0.1.8');
   assert.equal(healthSnapshot({ version: '9.9.9' }, settings).version, '0.1.8');
-  assert.equal((await dispatch(server, '/api/gmgn-onboarding', { body: { regenerate: false } })).status, 503);
-  assert.equal((await dispatch(server, '/api/gmgn-disconnect')).status, 503);
-  assert.equal((await dispatch(server, '/api/gmgn-key', { body: { apiKey: 'fixture-key' } })).status, 503);
+  assert.equal((await dispatch(server, '/api/gmgn-onboarding', { body: { regenerate: false } })).status, 405);
+  assert.equal((await dispatch(server, '/api/gmgn-disconnect')).status, 405);
+  assert.equal((await dispatch(server, '/api/gmgn-key', { body: { apiKey: 'fixture-key' } })).status, 405);
+  assert.equal(Object.hasOwn(status.body, 'gmgnConnection'), false);
 });
 
 test('injected Data verifier is shared, serialized and cannot leak key or rescue failures via Trade', async () => {

@@ -80,7 +80,7 @@ test('cancelled paid sampling forwards the signal and never records a late resul
   assert.equal(calls, 1); assert.deepEqual(rows[0].samples, {}); assert.equal(rows[0].sampleRetries, undefined);
 });
 
-test('passive observations remain free but never mix old GMGN and AVE baselines', () => {
+test('passive observations remain free but never mix legacy and AVE baselines', () => {
   const row = { chain: 'bsc', address: ca(1), marketProvider: 'AVE', price: 2,
     capturedAt: AT, sourceUpdatedAt: AT, expiresAt: AT + 30000, stale: false };
   const older = history({ baselineAt: AT - horizons.m5, baselineProvider: undefined });
@@ -90,6 +90,28 @@ test('passive observations remain free but never mix old GMGN and AVE baselines'
   const created = [];
   upsertOutcome(created, { ...row, symbol: 'MOCK', status: 'X_REVIEW' }, AT);
   assert.equal(created[0].baselineProvider, 'AVE');
+});
+
+test('unknown and explicitly legacy baselines retain history without paid or passive AVE backfills', async () => {
+  const legacy = [undefined, 'LEGACY_UNKNOWN', 'GMGN'].map((baselineProvider, index) => history({
+    address: ca(index + 1), baselineProvider, baselineAt: AT - horizons.m30 - 60_000,
+    samples: { m5: { at: AT - horizons.m30, price: 1.5, return: .5, source: 'LEGACY_SNAPSHOT' } }
+  }));
+  const before = structuredClone(legacy);
+  const quotes = new Map(legacy.map(item => [item.address, { chain: 'bsc', address: item.address,
+    marketProvider: 'AVE', price: 2, capturedAt: AT, sourceUpdatedAt: AT, expiresAt: AT + 30_000, stale: false }]));
+  assert.deepEqual(updateOutcomeTracking(legacy, quotes, AT, config.outcomeRetentionMs), before);
+  let reads = 0;
+  await collectOutcomeSamples(legacy, { priceAt: async () => { reads++; return { at: AT, price: 2 }; } }, 'bsc', { now: () => AT });
+  assert.equal(reads, 0);
+  assert.deepEqual(legacy, before);
+  assert.deepEqual(selectOutcomeJobs({ bsc: legacy }, { enabledChains: ['bsc'], limit: 4, now: AT }), []);
+});
+
+test('unlabelled outcome creation marks unknown provenance instead of asserting AVE', () => {
+  const outcomes = [];
+  upsertOutcome(outcomes, { chain: 'bsc', address: ca(1), price: 1, status: 'X_REVIEW' }, AT);
+  assert.equal(outcomes[0].baselineProvider, 'LEGACY_UNKNOWN');
 });
 
 test('cache-only cycles preserve the upstream success clock', async t => {

@@ -11,12 +11,16 @@ const sha = data => crypto.createHash('sha256').update(data).digest('hex');
 const pkg = value => JSON.stringify({ name: 'meme-radar-open-source', version: value, private: true });
 const lock = value => JSON.stringify({ name: 'meme-radar-open-source', version: value, lockfileVersion: 3,
   packages: { '': { name: 'meme-radar-open-source', version: value } } });
-const common = value => ({
+const common = value => {
+  const files = {
   'package.json': pkg(value), 'package-lock.json': lock(value),
   'src/main.mjs': '// main', 'src/live-leads.mjs': '// retained live leads', 'src/updater.mjs': '// updater',
   'scripts/supervise.mjs': '// supervise', 'scripts/update-worker.mjs': '// worker',
   'public/index.html': '<main>radar</main>',
-});
+  };
+  return { ...files, 'packaging/release-source.json': JSON.stringify({ schema: 1,
+    files: [...Object.keys(files), 'packaging/release-source.json'] }) };
+};
 
 function zip(input, platform) {
   const prefix = platform === 'darwin' ? 'MemeRadar-OpenSource-macOS/' : 'MemeRadar-OpenSource-Windows/';
@@ -40,6 +44,13 @@ function writeTree(root, files) {
   for (const [name, value] of Object.entries(files)) {
     const file = path.join(root, ...name.split('/')); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, value);
   }
+}
+
+function approve(root, names) {
+  const file = path.join(root, 'packaging/release-source.json');
+  const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+  value.files = [...new Set([...value.files, ...names])];
+  fs.writeFileSync(file, JSON.stringify(value));
 }
 
 function fixture(t, { mac = {}, windows = {}, checksum } = {}) {
@@ -87,6 +98,7 @@ test('release audit requires every current publish-source file in both platform 
     'src/new-production-module.mjs': '// newly added production source',
     'public/new-production-ui.mjs': '// newly added production browser source',
   });
+  approve(value.root, ['src/new-production-module.mjs', 'public/new-production-ui.mjs']);
   const result = auditRelease(value);
   for (const name of ['src/new-production-module.mjs', 'public/new-production-ui.mjs']) {
     assert.equal(result.findings.filter(row => row.includes('缺少当前发布源文件') && row.includes(name)).length, 2);
@@ -103,18 +115,24 @@ test('release audit blocks old archives that omit live-leads or contain stale ar
   assert.ok(result.findings.some(row => row.includes(stale.winName) && row.includes('src/main.mjs') && row.includes('不一致')));
 });
 
-test('release audit permits only explicit Windows runtime and dependency extras', t => {
-  const windows = fixture(t, { windows: {
-    'runtime/support.dll': 'runtime dependency',
-    'runtime/node_modules/npm/.npmrc': '',
-    'node_modules/example/package.json': '{"name":"example"}',
-    'node_modules/example/index.js': 'export default true;',
-  } });
-  assert.deepEqual(auditRelease(windows).findings, []);
+test('release audit permits only the explicit Windows runtime file and rejects arbitrary extras', t => {
+  assert.deepEqual(auditRelease(fixture(t)).findings, []);
+  for (const name of ['runtime/support.dll', 'runtime/private-notes.md', 'runtime/keys.json', 'runtime/node.exe.txt']) {
+    const windows = fixture(t, { windows: { [name]: 'private synthetic content without a recognizable secret shape' } });
+    assert.ok(auditRelease(windows).findings.some(row => row.includes(windows.winName)
+      && row.includes(name) && row.includes('未约定文件')));
+  }
+  const emptyRuntimeMetadata = fixture(t, { windows: { 'runtime/node_modules/npm/.npmrc': '' } });
+  assert.ok(auditRelease(emptyRuntimeMetadata).findings.some(row => row.includes('runtime/node_modules/npm/.npmrc')
+    && row.includes('私密路径')));
 
   const mac = fixture(t, { mac: { 'node_modules/example/index.js': 'export default true;' } });
   let result = auditRelease(mac);
-  assert.ok(result.findings.some(row => row.includes(mac.macName) && row.includes('node_modules/example/index.js') && row.includes('未约定文件')));
+  assert.ok(result.findings.some(row => row.includes(mac.macName) && row.includes('node_modules/example/index.js') && /未约定文件|私密路径/.test(row)));
+
+  const windowsDependency = fixture(t, { windows: { 'node_modules/example/index.js': 'export default true;' } });
+  result = auditRelease(windowsDependency);
+  assert.ok(result.findings.some(row => row.includes(windowsDependency.winName) && row.includes('node_modules/example/index.js') && /未约定文件|私密路径/.test(row)));
 
   const configuredRuntime = fixture(t, { windows: { 'runtime/node_modules/npm/.npmrc': '//registry.example/:_authToken=not-for-release' } });
   result = auditRelease(configuredRuntime);
@@ -131,6 +149,17 @@ test('release audit rejects unapproved archive files and nested private paths', 
   result = auditRelease(privatePath);
   assert.ok(result.findings.some(row => row.includes(privatePath.winName)
     && row.includes('docs/archive/state/ave-credentials.json') && row.includes('私密路径')));
+});
+
+test('release audit ignores unapproved local notes and blocks dotenv variants even when nested in an artifact', t => {
+  const value = fixture(t);
+  writeTree(value.root, { '.env.production': 'not-a-published-secret', 'docs/private-notes.md': 'private notes' });
+  assert.deepEqual(auditRelease(value).findings, []);
+  const leaked = fixture(t, { windows: { 'docs/.env.production': 'synthetic-private-value' } });
+  const result = auditRelease(leaked);
+  assert.ok(result.findings.some(row => row.includes('docs/.env.production') && row.includes('私密路径')));
+  const runtimeSecret = fixture(t, { windows: { 'runtime/backup.key': 'synthetic-private-value' } });
+  assert.ok(auditRelease(runtimeSecret).findings.some(row => row.includes('runtime/backup.key') && row.includes('私密路径')));
 });
 
 test('release audit rejects package version drift, wrong asset set and checksum mismatch', t => {
@@ -159,6 +188,23 @@ test('release audit rejects the locally configured AVE key even when hidden in a
   writeTree(value.root, { 'state/ave-credentials.json': JSON.stringify({ key: secret }) });
   const result = auditRelease(value);
   assert.ok(result.findings.some(row => row.includes(value.macName) && row.includes('包含本机凭证') && row.includes('src/unrelated.txt')));
+});
+
+test('source and final archive audit detect both schema-1 AVE keys without printing their values', t => {
+  const data = 'TestData8', trade = 'TestTradeSecretForLegacyAuditOnly';
+  for (const secret of [data, trade]) {
+    const value = fixture(t, { windows: { 'README-FIRST.txt': `accidental=${secret}` } });
+    writeTree(value.root, {
+      'state/ave-credentials.json': JSON.stringify({ schema: 1, keys: { data: ` ${data} `, trade } }),
+      'README.md': `accidental=${secret}`,
+    });
+    approve(value.root, ['README.md']);
+    const source = auditSourceTree(value.root);
+    assert.ok(source.findings.some(row => row.includes('包含本机凭证') && row.includes('README.md')));
+    const result = auditRelease(value);
+    assert.ok(result.findings.some(row => row.includes(value.winName) && row.includes('包含本机凭证') && row.includes('README-FIRST.txt')));
+    assert.doesNotMatch(JSON.stringify([...source.findings, ...result.findings]), new RegExp(`${data}|${trade}`));
+  }
 });
 
 test('release audit rejects Telegram bot token shaped text in final archives', t => {

@@ -34,14 +34,20 @@ function writeTree(root, files) {
   }
 }
 
+function approve(root, names) {
+  const file = path.join(root, 'packaging/release-source.json');
+  const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+  value.files = [...new Set([...value.files, ...names])];
+  fs.writeFileSync(file, JSON.stringify(value));
+}
+
 function packageJson(version = '0.1.9') {
-  return `${JSON.stringify({ name: 'meme-radar-open-source', version, private: true, dependencies: { 'gmgn-cli': '1.5.7' } }, null, 2)}\n`;
+  return `${JSON.stringify({ name: 'meme-radar-open-source', version, private: true }, null, 2)}\n`;
 }
 
 function packageLock(version = '0.1.9') {
   return `${JSON.stringify({ name: 'meme-radar-open-source', version, lockfileVersion: 3, requires: true, packages: {
-    '': { name: 'meme-radar-open-source', version, dependencies: { 'gmgn-cli': '1.5.7' } },
-    'node_modules/gmgn-cli': { version: '1.5.7' },
+    '': { name: 'meme-radar-open-source', version },
   } }, null, 2)}\n`;
 }
 
@@ -49,7 +55,7 @@ function fixture(t) {
   const parent = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'build-release-test-'));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const root = path.join(parent, 'source');
-  writeTree(root, {
+  const source = {
     'package.json': packageJson('0.1.10'), 'package-lock.json': packageLock('0.1.10'),
     'src/main.mjs': '// main\n', 'src/updater.mjs': '// updater\n', 'scripts/update-worker.mjs': '// worker\n',
     'scripts/supervise.mjs': '// supervise\n', 'public/index.html': '<main>radar</main>\n',
@@ -59,21 +65,23 @@ function fixture(t) {
     'packaging/windows-portable/README-FIRST.txt': 'Start here\r\n',
     'packaging/windows-portable/launcher.cjs': 'console.log("launcher");\n',
     'README.md': 'fixture\n',
-  });
+  };
+  writeTree(root, { ...source, 'packaging/release-source.json': JSON.stringify({ schema: 1,
+    files: [...Object.keys(source), 'packaging/release-source.json'] }) });
   const donorInput = {
     'package.json': packageJson(), 'package-lock.json': packageLock(),
     'src/main.mjs': '// old main\n', 'scripts/supervise.mjs': '// old supervise\n', 'public/index.html': '<main>old</main>\n',
     'MemeRadar-OpenSource.exe': Buffer.from('verified launcher'), 'runtime/node.exe': Buffer.from('verified node'),
     'packaging/windows-portable/launcher.cjs': 'console.log("launcher");\n',
-    'node_modules/gmgn-cli/package.json': JSON.stringify({ name: 'gmgn-cli', version: '1.5.7' }),
-    'node_modules/gmgn-cli/index.js': 'export default {}\n',
+    'node_modules/obsolete-fixture/package.json': JSON.stringify({ name: 'obsolete-fixture', version: '1.0.0' }),
+    'node_modules/obsolete-fixture/index.js': 'throw new Error("must never load legacy donor dependency")\n',
   };
   const donorBytes = zip(donorInput), donorName = 'MemeRadar-OpenSource-Windows-x64-0.1.9.zip', donorPath = path.join(parent, donorName);
   fs.writeFileSync(donorPath, donorBytes);
   const policy = { version: '0.1.9', assetName: donorName, sha256: sha256(donorBytes), requiredFiles: {
     'MemeRadar-OpenSource.exe': sha256(donorInput['MemeRadar-OpenSource.exe']),
     'runtime/node.exe': sha256(donorInput['runtime/node.exe']),
-  }, copiedPrefixes: ['node_modules/'] };
+  }, copiedPrefixes: [] };
   policy.launcherSource = { path: 'packaging/windows-portable/launcher.cjs', sha256: sha256(donorInput['packaging/windows-portable/launcher.cjs']) };
   return { parent, root, donorPath, donorBytes, policy };
 }
@@ -98,8 +106,8 @@ test('release builder creates deterministic v0.1.10 assets with fixed roots, che
   assert.equal(winByName.get('runtime/node.exe').data.toString(), 'verified node');
   assert.equal(winByName.get('OPEN-MEME-RADAR.bat').data.toString(), '@echo off\r\n');
   assert.equal(winByName.get('README-FIRST.txt').data.toString(), 'Start here\r\n');
-  assert.equal(macByName.has('node_modules/gmgn-cli/package.json'), false);
-  assert.equal(winByName.has('node_modules/gmgn-cli/package.json'), true);
+  assert.equal(mac.some(file => file.name.startsWith('node_modules/')), false);
+  assert.equal(windows.some(file => file.name.startsWith('node_modules/')), false);
   const sums = fs.readFileSync(path.join(first, names.checksums), 'utf8').trim().split('\n');
   assert.deepEqual(sums, [
     `${sha256(fs.readFileSync(path.join(first, names.mac)))}  ${names.mac}`,
@@ -107,17 +115,23 @@ test('release builder creates deterministic v0.1.10 assets with fixed roots, che
   ]);
 });
 
-test('release source excludes runtime state and credentials but includes every ordinary current file', t => {
+test('release source includes only explicitly approved files and blocks unlisted production code', t => {
   const value = fixture(t);
   writeTree(value.root, {
     'src/new-feature.mjs': 'export const enabled = true;\n',
     'state/radar.json': '{"private":true}', 'logs/radar.log': 'private', '.runtime/lock': 'private', '.git/config': 'private',
     '.env': 'SECRET=private', '.npmrc': '//registry/:_authToken=private', 'runtime/node.exe': 'local runtime',
     'node_modules/unwanted/index.js': 'local dependency',
+    '.env.production': 'OTHER_SECRET=private', 'docs/.env.local': 'NESTED_SECRET=private',
+    'docs/private-notes.md': 'private notes', 'docs/source.bak': 'backup', 'docs/api.key': 'private',
+    '.agents/personal.md': 'private instructions',
   });
+  assert.throws(() => collectReleaseSource(value.root), /未加入发布白名单.*src\/new-feature\.mjs/);
+  approve(value.root, ['src/new-feature.mjs']);
   const names = new Set(collectReleaseSource(value.root).map(file => file.name));
   assert.equal(names.has('src/new-feature.mjs'), true);
-  for (const name of ['state/radar.json', 'logs/radar.log', '.runtime/lock', '.git/config', '.env', '.npmrc', 'runtime/node.exe', 'node_modules/unwanted/index.js']) {
+  for (const name of ['state/radar.json', 'logs/radar.log', '.runtime/lock', '.git/config', '.env', '.npmrc', 'runtime/node.exe',
+    'node_modules/unwanted/index.js', '.env.production', 'docs/.env.local', 'docs/private-notes.md', 'docs/source.bak', 'docs/api.key', '.agents/personal.md']) {
     assert.equal(names.has(name), false, `${name} must not be released`);
   }
 });
@@ -128,17 +142,55 @@ test('release source rejects a local credential copied into an otherwise publish
     'state/ave-credentials.json': JSON.stringify({ key: secret }),
     'docs/accidental.txt': `key=${secret}\n`,
   });
+  approve(value.root, ['docs/accidental.txt']);
   assert.throws(() => collectReleaseSource(value.root), /本机凭证.*docs\/accidental\.txt/);
 });
 
+test('release source blocks both schema-1 AVE keys including short trimmed credentials', t => {
+  const data = 'TestData8', trade = 'TestTradeSecretForLegacyBuildOnly';
+  for (const secret of [data, trade]) {
+    const value = fixture(t);
+    writeTree(value.root, {
+      'state/ave-credentials.json': JSON.stringify({ schema: 1, keys: { data: ` ${data} `, trade } }),
+      'README.md': `accidental=${secret}\n`,
+    });
+    assert.throws(() => collectReleaseSource(value.root), error => {
+      assert.doesNotMatch(error.message, new RegExp(`${data}|${trade}`));
+      return /本机凭证.*README\.md/.test(error.message);
+    });
+  }
+});
+
+test('release whitelist cannot approve private paths, traversal, aliases or linked source directories', t => {
+  for (const forbidden of ['.env.production', 'docs/.env.local', 'docs/source.bak', 'docs/api.key', '../outside', 'src/../outside', 'state/radar.json']) {
+    const value = fixture(t);
+    approve(value.root, [forbidden]);
+    assert.throws(() => collectReleaseSource(value.root), /不安全或私密路径/);
+  }
+  const linked = fixture(t);
+  fs.mkdirSync(path.join(linked.parent, 'private-docs'));
+  fs.writeFileSync(path.join(linked.parent, 'private-docs/notes.md'), 'not publishable');
+  fs.symlinkSync(path.join(linked.parent, 'private-docs'), path.join(linked.root, 'docs'));
+  approve(linked.root, ['docs/notes.md']);
+  assert.throws(() => collectReleaseSource(linked.root), /符号链接目录/);
+});
+
 test('Windows donor must match the pinned archive and required binary hashes', t => {
-  const value = fixture(t), sourceManifest = JSON.parse(packageJson()), sourceLock = JSON.parse(packageLock());
-  const selected = loadWindowsDonor({ donorPath: value.donorPath, policy: value.policy, sourceManifest, sourceLock });
+  const value = fixture(t);
+  const selected = loadWindowsDonor({ donorPath: value.donorPath, policy: value.policy });
   assert.deepEqual(new Set(selected.map(file => file.name)), new Set([
-    'MemeRadar-OpenSource.exe', 'runtime/node.exe', 'node_modules/gmgn-cli/package.json', 'node_modules/gmgn-cli/index.js',
+    'MemeRadar-OpenSource.exe', 'runtime/node.exe',
   ]));
+  assert.throws(() => loadWindowsDonor({ donorPath: value.donorPath, policy: { ...value.policy, copiedPrefixes: ['node_modules/'] } }), /不允许复制依赖目录/);
   fs.appendFileSync(value.donorPath, 'tamper');
-  assert.throws(() => loadWindowsDonor({ donorPath: value.donorPath, policy: value.policy, sourceManifest, sourceLock }), /SHA-256/);
+  assert.throws(() => loadWindowsDonor({ donorPath: value.donorPath, policy: value.policy }), /SHA-256/);
+});
+
+test('AVE release builder rejects dependency metadata instead of silently producing an incomplete package', t => {
+  const value = fixture(t), manifest = JSON.parse(packageJson('0.1.10'));
+  fs.writeFileSync(path.join(value.root, 'package.json'), JSON.stringify({ ...manifest, dependencies: { 'obsolete-fixture': '1.0.0' } }));
+  assert.throws(() => buildRelease({ root: value.root, outDir: path.join(value.parent, 'blocked'), version: '0.1.10',
+    windowsDonor: value.donorPath, donorPolicy: value.policy }), /不应包含第三方 npm 依赖/);
 });
 
 test('release builder refuses output inside source, any source-version mismatch and overwrite', t => {

@@ -5,11 +5,9 @@ import crypto from 'node:crypto';
 import { TextDecoder } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { archiveFiles, releaseAssetName, UPDATE_LIMITS } from '../src/updater.mjs';
+import { approvedSourceFile, assertProductionListed, privateSourcePath, releaseSourceNames } from './release-source.mjs';
 
 const defaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const excluded = new Set(['.git', '.runtime', 'node_modules']);
-const releaseSourceExcludedRoots = new Set(['.git', '.runtime', 'node_modules', 'runtime', 'state', 'logs']);
-const releaseSourceNoise = new Set(['.DS_Store']);
 const forbiddenEntries = new Set(['state', 'logs', '.local-data', '.env', '.npmrc']);
 const textExtensions = new Set(['', '.bat', '.command', '.css', '.html', '.js', '.json', '.md', '.mjs', '.sh', '.txt']);
 const telegramToken = /\b\d{8,12}:[A-Za-z0-9_-]{30,}\b/;
@@ -21,8 +19,6 @@ const requiredPlatformFiles = Object.freeze({
   darwin: ['安装并启动.command', 'start-radar.command'],
   win32: ['MemeRadar-OpenSource.exe', 'OPEN-MEME-RADAR.bat', 'README-FIRST.txt', 'runtime/node.exe'],
 });
-const platformExtraRoots = Object.freeze({ darwin: new Set(), win32: new Set(['runtime', 'node_modules']) });
-const safeRuntimeMetadata = new Set(['runtime/node_modules/npm/.npmrc']);
 const validVersion = value => typeof value === 'string' && /^(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})$/.test(value);
 const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
 const inside = (root, name) => path.join(root, ...name.split('/'));
@@ -30,11 +26,14 @@ const inside = (root, name) => path.join(root, ...name.split('/'));
 function localSecrets(root) {
   const values = [];
   const add = value => {
-    if (typeof value === 'string' && value.trim() === value && value.length >= 12 && value.length <= 1024) values.push(Buffer.from(value));
+    if (typeof value !== 'string') return;
+    const secret = value.trim();
+    if (secret.length >= 8 && secret.length <= 4096) values.push(Buffer.from(secret));
   };
   try {
     const stored = JSON.parse(fs.readFileSync(path.join(root, 'state', 'ave-credentials.json'), 'utf8'));
     for (const key of ['key', 'token', 'secret']) add(stored?.[key]);
+    for (const key of ['data', 'trade']) add(stored?.keys?.[key]);
   } catch { /* A clean release source has no local credentials. */ }
   for (const name of ['gmgn-api-key', 'telegram-bot-token', 'agent-private-key', 'gmgn-pending-signing-key.pem']) {
     try { add(fs.readFileSync(path.join(root, 'state', name), 'utf8').trim()); } catch { /* Optional legacy/local secret. */ }
@@ -73,10 +72,10 @@ function plainFile(file) {
   } catch { return null; }
 }
 
-function privateReleasePath(name, data) {
-  if (safeRuntimeMetadata.has(name) && Buffer.isBuffer(data) && data.length === 0) return false;
+function privateReleasePath(name) {
   const parts = name.split('/');
-  return parts.some(part => forbiddenEntries.has(part) || ['.git', '.runtime'].includes(part)
+  return privateSourcePath(name.replace(/^runtime\//, '')) || parts.some(part => forbiddenEntries.has(part) || ['.git', '.runtime'].includes(part)
+    || /^\.env(?:\.|$)/i.test(part)
     || /^(?:ave-credentials\.json|gmgn-api-key|telegram-bot-token|agent-private-key|gmgn-pending-signing-key\.pem)$/i.test(part));
 }
 
@@ -88,29 +87,23 @@ function sourceReleaseManifest(root, findings) {
     findings.push('无法生成当前发布源文件清单');
     return files;
   }
-  function visit(directory, relative = '') {
-    const entries = fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      if (!relative && releaseSourceExcludedRoots.has(entry.name)) continue;
-      if (releaseSourceNoise.has(entry.name)) continue;
-      const next = relative ? `${relative}/${entry.name}` : entry.name;
-      const absolute = path.join(directory, entry.name);
-      if (privateReleasePath(next)) continue;
-      if (entry.isSymbolicLink()) { findings.push(`发布源不允许符号链接：${next}`); continue; }
-      if (entry.isDirectory()) { visit(absolute, next); continue; }
-      const stat = plainFile(absolute);
-      if (!entry.isFile() || !stat) { findings.push(`发布源文件不是唯一的普通文件：${next}`); continue; }
-      const data = fs.readFileSync(absolute);
-      files.set(next, { size: data.length, sha256: sha256(data) });
+  try {
+    const names = releaseSourceNames(root);
+    assertProductionListed(root, names);
+    for (const name of names) {
+      const { file, stat } = approvedSourceFile(root, name);
+      if (stat.size > UPDATE_LIMITS.file) { findings.push(`发布源文件过大：${name}`); continue; }
+      const data = fs.readFileSync(file);
+      files.set(name, { size: data.length, sha256: sha256(data) });
     }
-  }
-  visit(root);
+  } catch (error) { findings.push(`发布白名单校验失败：${error.message}`); }
   return files;
 }
 
 function allowedPlatformExtra(name, platform) {
-  if (requiredPlatformFiles[platform]?.includes(name)) return true;
-  return platformExtraRoots[platform]?.has(name.split('/')[0]) === true;
+  // The portable release carries only its pinned node.exe, not an arbitrary
+  // runtime tree. Unknown files (including innocent-looking notes) fail shut.
+  return requiredPlatformFiles[platform]?.includes(name) === true;
 }
 
 function readJson(file, findings, label) {
@@ -149,24 +142,12 @@ export function auditSourceTree(root = defaultRoot, { secretRoot = root } = {}) 
   const lock = readJson(path.join(root, 'package-lock.json'), findings, '发布源 package-lock.json');
   const version = validateManifest(manifest, lock, null, findings, '发布源');
 
-  function visit(directory, relative = '') {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      if (!relative && excluded.has(entry.name)) continue;
-      const next = relative ? `${relative}/${entry.name}` : entry.name;
-      const absolute = path.join(directory, entry.name);
-      if (entry.isSymbolicLink()) { findings.push(`发布源不允许符号链接：${next}`); continue; }
-      if (forbiddenEntries.has(entry.name) || /^(?:ave-credentials\.json|gmgn-api-key|agent-private-key)$/i.test(entry.name)) {
-        findings.push(`不应发布本机配置或状态：${next}`);
-        continue;
-      }
-      if (entry.isDirectory()) { visit(absolute, next); continue; }
-      if (!entry.isFile()) { findings.push(`发布源包含不受支持的文件类型：${next}`); continue; }
-      if (!textExtensions.has(path.extname(entry.name).toLowerCase()) || entry.name === 'package-lock.json') continue;
-      const content = fs.readFileSync(absolute, 'utf8');
-      inspectContent(content, next, findings, '发布源', secrets, privatePaths);
-    }
+  const sourceFiles = sourceReleaseManifest(root, findings);
+  for (const name of sourceFiles.keys()) {
+    if (!textExtensions.has(path.extname(name).toLowerCase()) || name === 'package-lock.json') continue;
+    const content = fs.readFileSync(inside(root, name), 'utf8');
+    inspectContent(content, name, findings, '发布源', secrets, privatePaths);
   }
-  visit(root);
   return { version, findings };
 }
 
@@ -252,7 +233,7 @@ export function auditReleaseArtifacts({ root = defaultRoot, artifactsDir, versio
       }
     }
     for (const file of files) {
-      if (privateReleasePath(file.name, file.data)) {
+      if (privateReleasePath(file.name)) {
         findings.push(`${item.name}包含嵌套的本机配置或私密路径：${file.name}`);
         continue;
       }

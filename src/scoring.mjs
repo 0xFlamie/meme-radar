@@ -109,10 +109,13 @@ function discoverySignalView(row = {}) {
   const smartDegenCount = optionalCount(row.smart_degen_count);
   const renownedCount = optionalCount(row.renowned_count);
   const holders = optionalCount(row.holder_count);
-  const swaps5m = optionalCount(first(row.swaps_5m, row.swaps));
-  const buys5m = optionalCount(first(row.buys_5m, row.buys));
-  const sells5m = optionalCount(first(row.sells_5m, row.sells));
-  const volume5m = optionalNonNegativeNumber(first(row.volume_5m, row.volume));
+  // AVE and its pool overlay expose explicit five-minute fields. Generic
+  // legacy counters have no verified interval or current evidence clock.
+  const ave = row.marketProvider === 'AVE';
+  const swaps5m = optionalCount(ave ? row.swaps_5m : first(row.swaps_5m, row.swaps));
+  const buys5m = optionalCount(ave ? row.buys_5m : first(row.buys_5m, row.buys));
+  const sells5m = optionalCount(ave ? row.sells_5m : first(row.sells_5m, row.sells));
+  const volume5m = optionalNonNegativeNumber(ave ? row.volume_5m : first(row.volume_5m, row.volume));
   const priceChange5m = optionalSignedRate(first(row.price_change_percent5m, row.price_change_percent_5m, row.price_change_percent));
   const smartBoost = smartDegenCount === null ? 0 : smartDegenCount >= 3 ? 14 : smartDegenCount === 2 ? 7 : 0;
   const kolOnly = smartDegenCount !== null && smartDegenCount <= 1 && renownedCount !== null && renownedCount > 0;
@@ -170,7 +173,7 @@ function freshAvePoolTrajectory(row, chain, now) {
     change1h: !poolFresh || rawChange1h === null ? null : rawChange1h / 100 };
 }
 
-// AVE discovery is a market-only shortlist. Missing proprietary GMGN fields do
+// AVE discovery is a market-only shortlist. Missing detailed risk fields do
 // not block the shortlist, but are never fabricated into a deep-audit pass.
 export function aveDiscoveryScreen(row, config, nowSec = Date.now() / 1000) {
   const now = nowSec * 1000, chain = config.chain;
@@ -235,6 +238,10 @@ export function aveDiscoveryScreen(row, config, nowSec = Date.now() / 1000) {
   for (const field of ['buy_volume_5m', 'sell_volume_5m']) {
     if (row[field] != null && !(optionalNonNegativeNumber(row[field]) > 0)) reasons.push(field === 'buy_volume_5m' ? '近5分钟买入额不足或未核验' : '近5分钟卖出额不足或未核验');
   }
+  // A current zero trade count is a known lack of that side even when the
+  // source does not publish a USD split. Missing counts remain unknown.
+  if (optionalCount(row.buys_5m) === 0) reasons.push('近5分钟无买入成交');
+  if (optionalCount(row.sells_5m) === 0) reasons.push('近5分钟无卖出成交');
   if (optionalBoolean(row.is_honeypot) === true || row.sellable === false || optionalBoolean(row.cannot_sell_all) === true) reasons.push('已知貔貅或卖出受限');
   if (optionalBoolean(row.is_wash_trading) === true) reasons.push('检测到刷量');
   for (const [field, label] of [['rug_ratio', 'rug风险'], ['bundler_rate', '捆绑机器人占比'], ['rat_trader_amount_rate', '内幕占比']]) {
@@ -713,7 +720,7 @@ export function deepScreen({ discovery, audit, nowMs = Date.now() }, config) {
   const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([name]) => name);
   const chainPass = failed.length === 0;
   const honeypotEvidence = isSol ? 'SOL不使用EVM貔貅字段；以铸币和冻结权限为安全基线'
-    : exactNotHoneypot ? 'GMGN明确非貔貅' : sellability.pass ? '经验卖出证据' : explicitHoneypot ? '检测到貔貅' : '未验证';
+    : exactNotHoneypot ? '安全证据明确非貔貅' : sellability.pass ? '经验卖出证据' : explicitHoneypot ? '检测到貔貅' : '未验证';
   const unknownFields = [
     openSource === null ? 'openSource' : null,
     !isSol && ownerRenounced === null ? 'ownerRenounced' : null,

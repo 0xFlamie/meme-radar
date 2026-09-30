@@ -12,7 +12,7 @@ if not exist "runtime\node.exe" (
 echo Meme雷达正在启动，请稍候……
 echo 浏览器打开后可正常使用；关闭此窗口会停止雷达。
 start "" /B "runtime\node.exe" scripts\wait-and-open.mjs
-"runtime\node.exe" --use-env-proxy src\main.mjs
+"runtime\node.exe" --use-env-proxy scripts\supervise.mjs
 
 if errorlevel 1 (
   echo.

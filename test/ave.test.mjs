@@ -72,6 +72,47 @@ test('zero 5m activity remains a known zero and malformed optional trending fact
   }
 });
 
+test('HTTP 200 schema failures are not successful diagnostics; valid empty rankings remain successful', async () => {
+  const cases = [
+    ['trending', { unexpected: 'no usable token list' }, client => client.trending('bsc')],
+    ['details', detail('eth'), client => client.details('bsc', CA)],
+    ['pair', pair({ pair: ca(9) }), client => client.pairDetails('bsc', POOL)],
+    ['klines', klines({ interval: 2 }), client => client.tokenKlines('bsc', CA)]
+  ];
+  for (const [endpoint, payload, request] of cases) {
+    const f = fixture({ fetchImpl: async () => Response.json(payload) });
+    await assert.rejects(request(f.client), { code: 'AVE_SCHEMA' });
+    const recent = f.client.snapshot().transport.recent;
+    assert.equal(recent.length, 1); assert.equal(recent[0].endpoint, endpoint);
+    assert.equal(recent[0].httpStatus, 200); assert.equal(recent[0].category, 'schema');
+    assert.equal(f.client.snapshot().metrics.requests, 1);
+    assert.equal(f.client.snapshot().metrics.estimatedCu, endpoint === 'klines' ? 10 : 5);
+    assert.doesNotMatch(JSON.stringify(recent), /no usable token list|public-mock-key|0x/);
+  }
+  const empty = fixture({ fetchImpl: async () => Response.json({ tokens: [] }) });
+  assert.deepEqual((await empty.client.trending('bsc')).rows, []);
+  assert.equal(empty.client.snapshot().transport.recent[0].category, 'ok');
+  assert.equal(empty.client.snapshot().metrics.requests, 1);
+});
+
+test('queued mixed schema outcomes update their own diagnostics without changing cadence or budget', async () => {
+  const starts = []; let at = AT;
+  const f = fixture({ now: () => at, minimumGapMs: 300000, pause: async ms => { at += ms; },
+    fetchImpl: async url => {
+      starts.push(at);
+      return Response.json(new URL(url).searchParams.get('chain') === 'eth' ? { tokens: [] } : { unexpected: KEY });
+    } });
+  await f.client.hydrate();
+  const results = await Promise.allSettled([f.client.trending('bsc'), f.client.trending('eth'), f.client.trending('base')]);
+  assert.deepEqual(results.map(result => result.status), ['rejected', 'fulfilled', 'rejected']);
+  assert.deepEqual(f.client.snapshot().transport.recent.map(row => [row.chain, row.category, row.httpStatus]),
+    [['bsc', 'schema', 200], ['eth', 'ok', 200], ['base', 'schema', 200]]);
+  assert.deepEqual(starts.map(time => time - AT), [0, 300000, 600000]);
+  assert.equal(f.client.snapshot().metrics.requests, 3);
+  assert.equal(f.client.snapshot().budget.totalUsed, 15);
+  assert.doesNotMatch(JSON.stringify(f.client.snapshot().transport), new RegExp(KEY));
+});
+
 test('cache and concurrent dedupe preserve capture and upstream clocks without recharging', async () => {
   const f = fixture();
   const [a, b] = await Promise.all([f.client.discover('bsc'), f.client.discover('bsc')]);
@@ -79,6 +120,78 @@ test('cache and concurrent dedupe preserve capture and upstream clocks without r
   f.advance(40000); const c = await f.client.discover('bsc');
   assert.equal(c[0].capturedAt, AT); assert.equal(c[0].sourceUpdatedAt, AT - 10000); assert.equal(c[0].stale, true);
   assert.equal(f.client.snapshot().budget.used, 5); assert.equal(f.calls.length, 1);
+});
+
+test('production USD buy/sell aliases populate discovery and equivalent aliases agree numerically', async () => {
+  for (const changes of [
+    { token_buy_tx_volume_usd_5m: '600.25', token_sell_tx_volume_usd_5m: '0' },
+    { token_buy_tx_volume_usd_5m: 600.25, token_sell_tx_volume_usd_5m: 0,
+      token_buy_volume_u_5m: '600.250', token_sell_volume_u_5m: '0' }
+  ]) {
+    const f = fixture({ fetchImpl: async () => Response.json({ tokens: [token('bsc', changes)] }) });
+    const [row] = await f.client.discover('bsc');
+    assert.equal(row.buy_volume_5m, 600.25); assert.equal(row.sell_volume_5m, 0);
+  }
+  const missing = fixture();
+  const [row] = await missing.client.discover('bsc');
+  assert.equal(row.buy_volume_5m, null); assert.equal(row.sell_volume_5m, null);
+});
+
+test('malformed or conflicting buy/sell aliases quarantine the token and details fail closed', async () => {
+  for (const changes of [
+    { token_buy_tx_volume_usd_5m: '-1' }, { token_sell_tx_volume_usd_5m: 'NaN' },
+    { token_buy_tx_volume_usd_5m: true }, { token_sell_tx_volume_usd_5m: '' },
+    { token_buy_tx_volume_usd_5m: '12', token_buy_volume_u_5m: '13' },
+    { token_sell_tx_volume_usd_5m: '12', token_sell_volume_u_5m: '13' }
+  ]) {
+    const invalid = token('bsc', changes), good = token('bsc', { token: ca(8) });
+    const f = fixture({ fetchImpl: async () => Response.json({ tokens: [invalid, good] }) });
+    assert.deepEqual((await f.client.trending('bsc')).rows.map(row => row.token), [ca(8)]);
+    const onlyInvalid = fixture({ fetchImpl: async () => Response.json({ tokens: [invalid] }) });
+    await assert.rejects(onlyInvalid.client.trending('bsc'), { code: 'AVE_SCHEMA' });
+    const invalidDetails = fixture({ fetchImpl: async () => Response.json(detail('bsc', changes)) });
+    await assert.rejects(invalidDetails.client.details('bsc', CA), { code: 'AVE_SCHEMA' });
+  }
+});
+
+test('validated main_pair supplies only a route hint on EVM, v4 and Solana', async () => {
+  const solToken = 'So11111111111111111111111111111111111111112';
+  const solPool = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+  for (const [chain, apiChain, id, pool] of [
+    ['bsc', 'bsc', CA, POOL], ['robinhood', 'robinhood', CA, '0x' + 'a'.repeat(64)],
+    ['sol', 'solana', solToken, solPool]
+  ]) {
+    const f = fixture({ fetchImpl: async () => Response.json({ tokens: [token(apiChain, { token: id, main_pair: pool })] }) });
+    const [row] = await f.client.discover(chain);
+    assert.equal(row.pairAddress, pool); assert.equal(row.poolEvidence, undefined);
+    assert.equal(row.poolCreatedAt, undefined); assert.equal(row.firstTradeAt, undefined);
+  }
+  for (const main_pair of ['https://example.com', ca(0), '0x' + 'e'.repeat(40), '../pair', '0x' + '0'.repeat(64)]) {
+    const f = fixture({ fetchImpl: async () => Response.json({ tokens: [token('bsc', { main_pair })] }) });
+    assert.equal((await f.client.discover('bsc'))[0].pairAddress, undefined);
+  }
+});
+
+test('a main_pair hint neither pins an old quote nor approves an unbound pair audit', async () => {
+  let quote = 1;
+  const f = fixture({ fetchImpl: async () => Response.json({ tokens: [token('bsc', {
+    main_pair: POOL, current_price_usd: String(quote), updated_at: f.now() / 1000
+  })] }) });
+  const [first] = await f.client.discover('bsc');
+  f.advance(241000); quote = 2;
+  const [fresh] = await f.client.discover('bsc');
+  assert.equal(fresh.price, 2); assert.ok(fresh.sourceUpdatedAt > first.sourceUpdatedAt);
+  assert.equal(fresh.stale, false); assert.equal(fresh.poolEvidence, undefined);
+
+  const unbound = fixture({ fetchImpl: async url => Response.json(url.includes('/pairs/')
+    ? pair({ target_token: ca(9), token0_address: ca(9) })
+    : url.includes('/klines/') ? klines() : detail('bsc', { main_pair: POOL })) });
+  const audit = await unbound.client.audit(CA, AT / 1000, 'bsc');
+  assert.equal(audit.info.pairAddress, POOL);
+  assert.equal(audit.info.poolEvidence, undefined);
+  assert.equal(audit._meta.endpoints.pool.state, 'unverified');
+  assert.equal(audit._meta.endpoints.pool.bound, false);
+  assert.equal(audit.pool.liquidity, undefined);
 });
 
 test('details, K lines, and candidate key verification share a sixty-second completion gap and one budget', async () => {
@@ -220,6 +333,17 @@ test('one incomplete trending row cannot take an otherwise valid chain offline',
   assert.deepEqual(result.rows.map(row => row.token), [CA]);
 });
 
+test('conflicting duplicates quarantine every entry for their address regardless of order', async () => {
+  const one = token('bsc', { token_tx_volume_usd_5m: '120', token_tx_count_5m: 3 });
+  const other = { ...one, token_tx_volume_usd_5m: '130', token_tx_count_5m: 4 };
+  const invalid = { ...one, current_price_usd: '0' }, good = token('bsc', { token: ca(8) });
+  for (const rows of [[one, good, other, one], [other, good, one, other],
+    [one, good, invalid, one], [invalid, good, one, invalid]]) {
+    const f = fixture({ fetchImpl: async () => Response.json({ tokens: rows }) });
+    assert.deepEqual((await f.client.trending('bsc')).rows.map(row => row.token), [ca(8)]);
+  }
+});
+
 test('Solana is mapped explicitly while unverified chains are never reported supported', async () => {
   const sol = 'So11111111111111111111111111111111111111112';
   const f = fixture({ fetchImpl: async url => Response.json({ tokens: [token(new URL(url).searchParams.get('chain'), { token: sol })] }) });
@@ -356,8 +480,8 @@ test('discovery falls through a mismatched primary pool in ranked order with one
   const pools = [ca(20), ca(21), ca(22)], seen = [];
   const f = fixture({ enrichLimit: 2, fetchImpl: async url => {
     seen.push(new URL(url).pathname);
-    if (url.includes('/trending?')) return Response.json({ tokens: [token()] });
-    if (url.includes('/tokens/')) return Response.json({ status: 1, data: { token: token(),
+    if (url.includes('/trending?')) return Response.json({ tokens: [token('bsc', { main_pair: pools[0] })] });
+    if (url.includes('/tokens/')) return Response.json({ status: 1, data: { token: token('bsc', { main_pair: pools[0] }),
       pairs: pools.map((pool, index) => ({ chain: 'bsc', pair: pool, amm: 'rank-' + index })) } });
     if (url.includes('/pairs/')) {
       const requested = pools.find(pool => url.includes(pool));
@@ -369,6 +493,8 @@ test('discovery falls through a mismatched primary pool in ranked order with one
   await f.client.discover('bsc'); f.advance(31000);
   const [row] = await f.client.discover('bsc');
   assert.equal(row.pairAddress, pools[1]);
+  assert.equal(row.poolEvidence.pair, pools[1]);
+  assert.equal(f.client.lastDiscoveryHealth.enrichment.enriched, 1);
   assert.deepEqual(seen.filter(path => path.includes('/pairs/')), pools.slice(0, 2).map(pool => '/v2/pairs/' + pool + '-bsc'));
   assert.equal(f.client.snapshot().budget.used, 20);
 });

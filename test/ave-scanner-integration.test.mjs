@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { config } from '../src/config.mjs';
+import { CHART_RISK_VERSION } from '../src/chart-risk.mjs';
 import { AveClient } from '../src/ave.mjs';
 import { discoveryScreen, deepScreen } from '../src/scoring.mjs';
 import { Scanner, classifyDeepResult, updateOutcomeTracking } from '../src/scanner.mjs';
 import { LiveDiscovery, normalizeLiveRows } from '../src/live-discovery.mjs';
+import { toPublicStatus } from '../src/server.mjs';
 
 const ca = n => '0x' + n.toString(16).padStart(40, '0'), CA = ca(1), POOL = ca(2);
 const AT = 1800000000000, settings = { ...config, chain: 'bsc', maxDeepAuditsPerCycle: 1 };
@@ -36,7 +38,35 @@ function marketAudit(at) {
 }
 const liveOptions = (provider, clock = () => AT) => ({ provider, now: clock, settings, schedule: () => ({ unref() {} }), cancel: () => {} });
 
-test('AVE shortlist admits verified market facts without pretending missing GMGN risk evidence is safe', () => {
+test('favorite-only queue entries gain a separate first qualification only after the actual market screen passes', async () => {
+  const state = memoryState(), firstSeenAt = Date.now() - 11 * 60_000;
+  state.value.auditQueue = [{ address: CA, firstSeenAt, lastSeenAt: firstSeenAt, status: 'QUEUED', watched: true }];
+  let ready = false;
+  const controls = { value: { enabledChains: ['bsc'],
+    annotations: { [`bsc:${CA}`]: { address: CA, chain: 'bsc', favorite: true } } } };
+  const provider = { keyEpoch: 0, configured: async () => true,
+    discover: async () => ready ? [row(Date.now())] : [] };
+  const scanner = new Scanner({ provider, state, controls, settings: { ...settings, maxDeepAuditsPerCycle: 0 } });
+  await scanner.cycle();
+  assert.equal(state.value.auditQueue[0].watched, true);
+  assert.equal(state.value.auditQueue[0].qualifiedAt, null);
+  const beforeQualification = Date.now(); ready = true;
+  await scanner.cycle();
+  assert.equal(state.value.auditQueue[0].firstSeenAt, firstSeenAt);
+  assert.equal(state.value.auditQueue[0].watched, false);
+  assert.ok(state.value.auditQueue[0].qualifiedAt >= beforeQualification);
+  const qualifiedAt = state.value.auditQueue[0].qualifiedAt;
+  ready = false;
+  await scanner.cycle();
+  assert.equal(state.value.auditQueue[0].watched, true);
+  assert.equal(state.value.auditQueue[0].qualifiedAt, qualifiedAt);
+  ready = true;
+  await scanner.cycle();
+  assert.equal(state.value.auditQueue[0].qualifiedAt, qualifiedAt, 'refresh and monitor reentry do not renew qualification');
+  assert.equal(state.value.auditQueue[0].firstSeenAt, firstSeenAt);
+});
+
+test('AVE shortlist admits verified market facts without pretending missing risk evidence is safe', () => {
   const screen = discoveryScreen(row(), settings, AT / 1000);
   assert.equal(screen.pass, true); assert.equal(screen.ageBasis, 'trade'); assert.equal(screen.createdAt, AT / 1000 - 3500);
   assert.ok(screen.unknownFields.includes('honeypot')); assert.equal(screen.signals.buys5m, null);
@@ -135,7 +165,7 @@ test('official token launch time is a usable fallback without being mislabeled a
 
 test('LiveDiscovery uses provider.live, not run, and preserves cache time/expiry', async () => {
   let at = AT, calls = 0;
-  const provider = { keyEpoch: 0, configured: async () => true, run: () => assert.fail('must not invoke GMGN run'),
+  const provider = { keyEpoch: 0, configured: async () => true, run: () => assert.fail('must not invoke a CLI process'),
     live: async () => { calls++; return { tokens: [row()], capturedAt: AT - 1000 }; } };
   const live = new LiveDiscovery(liveOptions(provider, () => at)); live.touch('bsc'); await live.poll();
   assert.equal(live.snapshot('bsc').rows.length, 1); assert.equal(live.snapshot('bsc').lastSuccessAt, AT - 1000);
@@ -157,7 +187,7 @@ test('live AVE errors retain honest budget/quota states and use absolute retryAt
   }
 });
 
-test('scanner AVE provider alias keeps healthy incomplete audits in WAIT_RECHECK, never X review/voice event', async () => {
+test('scanner AVE provider keeps healthy incomplete audits in WAIT_RECHECK, never X review/voice event', async () => {
   const state = memoryState();
   const provider = { keyEpoch: 0, configured: async () => true, discover: async () => [row(Date.now())],
     audit: async () => marketAudit(Date.now()), metrics: {}, lastDiscoveryHealth: { complete: true } };
@@ -186,6 +216,25 @@ test('default open-source fast feed never turns a successful hot-list read into 
   assert.equal(state.value.liveLeads[0].sourceUpdatedAt > 0, true);
   assert.equal(state.value.liveLeads[0].displayUntil - state.value.liveLeads[0].lastConfirmedAt, config.liveLeadRetentionMs);
   assert.equal(Number.isFinite(state.value.auditQueueStats.estimatedMinutes), false);
+});
+
+test('scanner rejects unlabelled discovery and keeps legacy candidates as non-approved history', async () => {
+  const at = Date.now(), state = memoryState();
+  const unknown = row(at, { marketProvider: undefined });
+  state.value.candidates = [{ address: CA, chain: 'bsc', status: 'X_REVIEW', auditedAt: at,
+    gmgnUrl: 'https://legacy.example/token', deep: { chainPass: true, chartRisk: { version: CHART_RISK_VERSION, pass: true } } }];
+  const provider = { keyEpoch: 0, configured: async () => true, discover: async () => [unknown], metrics: {},
+    audit: async () => assert.fail('legacy discovery must not dispatch a new audit') };
+  const scanner = new Scanner({ provider, state, settings: { ...config, chain: 'bsc' } });
+  assert.deepEqual(scanner.enqueueReview('bsc', unknown), { accepted: false, reason: 'outside_audit_scope' });
+  await scanner.cycle(); scanner.stop();
+  assert.equal(state.value.discoveredCount, 0);
+  assert.equal(state.value.liveLeads.length, 0);
+  assert.equal(state.value.candidates.length, 1);
+  assert.equal(state.value.candidates[0].status, 'WAIT_RECHECK');
+  assert.equal(state.value.candidates[0].deep.chainPass, false);
+  assert.equal(Object.hasOwn(state.value.candidates[0], 'gmgnUrl'), false);
+  assert.equal(Object.hasOwn(scanner, 'gmgn'), false);
 });
 
 test('scanner only defers current explicit market rejection, not stale or missing evidence', async () => {
@@ -225,6 +274,59 @@ test('scanner captures epoch after configuration refresh and classifies quota/bu
     assert.equal(state.value.policy.scanIntervalMs, settings.scanIntervalMs);
     assert.equal(state.value.policy.chain, 'bsc');
     assert.doesNotMatch(state.value.error, /secret provider text/);
+    assert.equal(state.value.events[0].type, status);
+    assert.equal(state.value.events[0].code, code);
+    assert.equal(state.value.events[0].stage, 'discovery');
+    assert.notEqual(state.value.events[0].type, 'ERROR', 'budget, quota and rate protection are not generic network errors');
+    assert.equal(toPublicStatus(state.value).events[0].code, code);
+  }
+});
+
+test('new discovery failure events classify auth, timeout and network from codes without storing raw upstream text', async () => {
+  const raw = 'private_fixture Authorization: Bearer fixture_key https://invalid.example/path?key=fixture_key';
+  for (const [code, type, status] of [
+    ['AVE_AUTH', 'AUTH', 'AVE_AUTH_REQUIRED'], ['AVE_CONFIG', 'AUTH', 'AVE_AUTH_REQUIRED'], ['AVE_DISABLED', 'AUTH', 'AVE_AUTH_REQUIRED'],
+    ['AVE_TIMEOUT', 'TIMEOUT', 'ERROR'], ['AVE_NETWORK', 'NETWORK', 'ERROR'], ['AVE_SCHEMA', 'ERROR', 'ERROR'],
+    [raw, 'ERROR', 'ERROR'], ['constructor', 'ERROR', 'ERROR']
+  ]) {
+    const state = memoryState(); let reads = 0;
+    const provider = { keyEpoch: 0, configured: async () => true,
+      discover: async () => { reads++; throw Object.assign(new Error(raw), { code }); } };
+    const scanner = new Scanner({ provider, state, settings }); await scanner.cycle(); scanner.stop();
+    const safeCode = [raw, 'constructor'].includes(code) ? 'AVE_REQUEST_FAILED' : code;
+    assert.equal(reads, 1, 'classification cannot dispatch an extra retry');
+    assert.equal(state.value.status, status);
+    assert.equal(state.value.events[0].type, type);
+    assert.equal(state.value.events[0].code, safeCode);
+    assert.equal(state.value.events[0].stage, 'discovery');
+    assert.equal(state.value.sourceHealth.discovery.trending.code, safeCode);
+    assert.doesNotMatch(JSON.stringify(state.value), /private_fixture|fixture_key|invalid\.example|Authorization/);
+    const event = toPublicStatus(state.value).events[0];
+    assert.equal(event.code, safeCode); assert.equal(event.type, type); assert.equal(event.stage, 'discovery');
+    assert.doesNotMatch(JSON.stringify(event), /https?:|Bearer|fixture_key/);
+  }
+});
+
+test('audit failure events retain their stage and safe cause while queue retry timing and attempts stay unchanged', async () => {
+  const raw = 'private_fixture https://invalid.example/private Authorization: Bearer fixture_key';
+  for (const [code, type] of [['AVE_AUTH', 'AUTH'], ['AVE_TIMEOUT', 'TIMEOUT'], ['AVE_NETWORK', 'NETWORK'],
+    ['AVE_RATE_LIMITED', 'RATE_LIMITED'], ['AVE_QUOTA', 'QUOTA_PAUSED'], [raw, 'AUDIT_RETRY']]) {
+    const at = Date.now(), state = memoryState(); let audits = 0;
+    const provider = { keyEpoch: 0, configured: async () => true, discover: async () => [row(at)],
+      lastDiscoveryHealth: { provider: 'AVE', complete: true, checkedAt: at },
+      audit: async () => { audits++; throw Object.assign(new Error(raw), { code }); } };
+    const scanner = new Scanner({ provider, state, settings }); await scanner.cycle(); scanner.stop();
+    const safeCode = code === raw ? 'AVE_REQUEST_FAILED' : code;
+    assert.equal(audits, 1);
+    const event = state.value.events.find(event => event.stage === 'audit');
+    assert.equal(event.type, type); assert.equal(event.code, safeCode);
+    assert.equal(state.value.auditQueue[0].attempts, 1);
+    assert.equal(state.value.auditQueue[0].nextAuditAt - state.value.auditQueue[0].lastAuditedAt, settings.dynamicRecheckMs);
+    assert.equal(state.value.candidates[0].status, 'WAIT_RECHECK');
+    assert.equal(state.value.sourceHealth.lastAudit.code, safeCode);
+    assert.doesNotMatch(JSON.stringify(state.value), /private_fixture|fixture_key|invalid\.example|Authorization/);
+    const publicEvent = toPublicStatus(state.value).events.find(event => event.stage === 'audit');
+    assert.equal(publicEvent.code, safeCode); assert.equal(publicEvent.type, type); assert.match(publicEvent.message, /^深审：/);
   }
 });
 

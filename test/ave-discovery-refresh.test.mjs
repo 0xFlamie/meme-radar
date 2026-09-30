@@ -8,19 +8,26 @@ import { LiveDiscovery, normalizeLiveRows, discoveryDiagnostics } from '../src/l
 const AT = Date.UTC(2026, 8, 22, 12), ca = n => '0x' + n.toString(16).padStart(40, '0');
 function fixture({ perPage = [[1]], caps = {}, noPoolCap = false, oldToken = false, enrichLimit = 3,
   maxTrendingPages = 3, rotateTrendingPages = false, failPage = -1, pageStatus = 429,
-  failLaterPool = false, latency = 0, laterHook = false, ready = [] } = {}) {
+  failLaterPool = false, latency = 0, laterHook = false, ready = [], minimumGapMs = 60000,
+  retryAfter = '60', dailyBudgetCu = 30000, pageFailure = '', timeoutMs = 12000 } = {}) {
   let at = AT, budget = null;
-  const calls = [], token = n => ({ token: ca(n), chain: 'bsc', name: 'Fixture', symbol: 'T' + n,
+  const calls = [], starts = [], token = n => ({ token: ca(n), chain: 'bsc', name: 'Fixture', symbol: 'T' + n,
     current_price_usd: '1', market_cap: String(caps[n] ?? 40000), holders: 30, updated_at: Math.floor((oldToken ? AT - 120000 : at) / 1000),
     ...(ready.includes(n) ? { main_pair_tvl: '12000', token_tx_volume_usd_5m: '500',
       token_buy_volume_u_5m: '300', token_sell_volume_u_5m: '200', launch_at: Math.floor(at / 1000) - 3600 } : {}) });
   const client = new AveClient({ apiKeyProvider: () => 'mock-not-live-key', now: () => at, pause: async ms => { at += ms; },
-    enrichLimit, maxTrendingPages, rotateTrendingPages,
-    readBudget: () => budget, saveBudget: next => { budget = structuredClone(next); }, fetchImpl: async value => {
-      const url = new URL(value); calls.push(url.pathname + url.search); at += latency;
+    enrichLimit, maxTrendingPages, rotateTrendingPages, minimumGapMs, dailyBudgetCu, timeoutMs,
+    readBudget: () => budget, saveBudget: next => { budget = structuredClone(next); }, fetchImpl: async (value, init) => {
+      const url = new URL(value); calls.push(url.pathname + url.search); starts.push(at); at += latency;
       if (url.pathname.endsWith('/trending')) {
         const page = Number(url.searchParams.get('current_page'));
-        if (page === failPage) return new Response('request failed', { status: pageStatus, headers: { 'Retry-After': '60' } });
+        if (page === failPage) {
+          if (pageFailure === 'SCHEMA') return Response.json({ tokens: [token(8), { ...token(8), current_price_usd: '2' }], next_page: page + 1 });
+          if (pageFailure === 'NETWORK') throw new Error('offline network failure');
+          if (pageFailure === 'TIMEOUT') return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new Error('offline timeout')), { once: true }));
+          if (pageFailure === 'SIZE') return new Response('oversized', { headers: { 'Content-Length': '1048577' } });
+          return new Response('request failed', { status: pageStatus, headers: { 'Retry-After': retryAfter } });
+        }
         return Response.json({ tokens: (perPage[page] || []).map(token), next_page: page + 1 < perPage.length ? page + 1 : -1 });
       }
       const id = parseInt(url.pathname.split('/').at(-1).split('-')[0], 16);
@@ -33,7 +40,7 @@ function fixture({ perPage = [[1]], caps = {}, noPoolCap = false, oldToken = fal
         ...(noPoolCap ? {} : { market_cap: '42000' }), tvl: '12000', updated_at: Math.floor(at / 1000),
         created_at: Math.floor(at / 1000) - 3600, volume_u_5m: '500', buy_volume_u_5m: '300', sell_volume_u_5m: '200' });
     } });
-  return { client, calls, now: () => at, advance: ms => { at += ms; },
+  return { client, calls, starts, now: () => at, advance: ms => { at += ms; },
     setPage: (page, ids) => { perPage[page] = ids; } };
 }
 const screen = (r, at) => discoveryScreen(r, { ...config, chain: 'bsc' }, at / 1000);
@@ -149,6 +156,123 @@ test('single-request rotation leaves a productive head when it adds fewer than t
     `/v2/tokens/trending?chain=bsc&current_page=${page}&page_size=100`));
   assert.equal(f.client.snapshot().metrics.byKind.trending.requests, 3,
     'novelty-based rotation must still keep one paid trending request per round');
+});
+
+test('single-request rotation bounds consecutive novel heads without increasing production request frequency', async () => {
+  const allReady = Array.from({ length: 30 }, (_, index) => index + 1);
+  const f = fixture({ perPage: [[1, 2, 3, 4], [20], [21]], ready: allReady, enrichLimit: 0,
+    maxTrendingPages: 1, rotateTrendingPages: true, minimumGapMs: 300000 });
+  await f.client.hydrate();
+  const heads = [[1, 2, 3, 4], [5, 6, 7, 8], null, [9, 10, 11, 12], [13, 14, 15, 16], null];
+  for (let round = 0; round < heads.length; round++) {
+    if (heads[round]) f.setPage(0, heads[round]);
+    await f.client.discover('bsc');
+    if (round < heads.length - 1) f.advance(300000);
+  }
+  assert.deepEqual(f.calls, [0, 0, 1, 0, 0, 2].map(page =>
+    `/v2/tokens/trending?chain=bsc&current_page=${page}&page_size=100`));
+  assert.equal(f.client.snapshot().metrics.byKind.trending.requests, heads.length);
+  assert.equal(f.client.snapshot().metrics.estimatedCu, heads.length * 5);
+  assert.ok(f.starts.slice(1).every((at, index) => at - f.starts[index] >= 300000));
+});
+
+test('cached head reads do not consume rotation turns or force a paid tail request', async () => {
+  const f = fixture({ perPage: [[1, 2, 3, 4], [8]], ready: [1, 2, 3, 4, 8], enrichLimit: 0,
+    maxTrendingPages: 1, rotateTrendingPages: true });
+  await f.client.discover('bsc');
+  for (let i = 0; i < 3; i++) { f.advance(31000); await f.client.discover('bsc'); }
+  assert.equal(f.calls.length, 1);
+  f.advance(241000); await f.client.discover('bsc');
+  f.advance(241000); await f.client.discover('bsc');
+  assert.deepEqual(f.calls, [0, 0, 1].map(page =>
+    `/v2/tokens/trending?chain=bsc&current_page=${page}&page_size=100`));
+});
+
+test('tail 429 recovers only through page zero and preserves Retry-After and the five-minute floor', async () => {
+  const f = fixture({ perPage: [[1], [2], [3]], caps: { 1: 9000000 }, enrichLimit: 0,
+    maxTrendingPages: 1, rotateTrendingPages: true, failPage: 1, retryAfter: '900', minimumGapMs: 300000 });
+  await f.client.hydrate();
+  await f.client.discover('bsc');
+  f.advance(300000);
+  await assert.rejects(f.client.discover('bsc'), { code: 'AVE_RATE_LIMITED' });
+  const retryAt = f.client.nextAllowedAt;
+  assert.equal(retryAt, f.now() + 900000);
+  f.advance(899999);
+  await assert.rejects(f.client.discover('bsc'), { code: 'AVE_RATE_LIMITED' });
+  assert.equal(f.calls.length, 2, 'the blocked attempt dispatches nothing');
+  assert.equal(f.client.snapshot().metrics.estimatedCu, 10);
+  f.advance(1);
+  let probes = 0;
+  while (f.client.snapshot().recovery.active && probes < 8) {
+    await f.client.discover('bsc'); probes++;
+    assert.equal(f.client.lastDiscoveryHealth.coverage.page, 0);
+    if (f.client.snapshot().recovery.active) f.advance(f.client.schedulerReadyAt - f.now());
+  }
+  assert.equal(f.client.snapshot().recovery.active, false);
+  assert.equal(probes, 5);
+  assert.deepEqual(f.calls.map(path => Number(new URL(path, 'https://offline.invalid').searchParams.get('current_page'))), [0, 1, 0, 0, 0, 0, 0]);
+  assert.ok(f.starts[2] >= retryAt);
+  assert.ok(f.starts.slice(1).every((at, index) => at - f.starts[index] >= 300000));
+  assert.equal(f.client.snapshot().metrics.estimatedCu, f.calls.length * 5);
+});
+
+test('page-zero recovery cannot bypass a daily budget spent by the failed tail request', async () => {
+  const f = fixture({ perPage: [[1], [2]], caps: { 1: 9000000 }, enrichLimit: 0,
+    maxTrendingPages: 1, rotateTrendingPages: true, failPage: 1, retryAfter: '900',
+    minimumGapMs: 300000, dailyBudgetCu: 10 });
+  await f.client.hydrate();
+  await f.client.discover('bsc'); f.advance(300000);
+  await assert.rejects(f.client.discover('bsc'), { code: 'AVE_RATE_LIMITED' });
+  f.advance(900000);
+  await assert.rejects(f.client.discover('bsc'), { code: 'AVE_BUDGET' });
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.client.snapshot().budget.dailyUsed, 10);
+});
+
+test('invalid or unavailable tails yield to a successful head and the other bounded tail without extra requests', async () => {
+  for (const [pageFailure, pageStatus, expectedCode] of [
+    ['SCHEMA', 200, 'AVE_SCHEMA'], ['', 503, 'AVE_UPSTREAM'], ['NETWORK', 200, 'AVE_NETWORK'],
+    ['TIMEOUT', 200, 'AVE_TIMEOUT'], ['SIZE', 200, 'AVE_SIZE']
+  ]) {
+    const f = fixture({ perPage: [[1], [2], [3]], caps: { 1: 9000000 }, enrichLimit: 0,
+      maxTrendingPages: 1, rotateTrendingPages: true, failPage: 1, pageFailure, pageStatus,
+      minimumGapMs: 300000, timeoutMs: pageFailure === 'TIMEOUT' ? 5 : 12000 });
+    await f.client.hydrate();
+    let firstCapturedAt;
+    for (let round = 0; round < 6; round++) {
+      if (round === 1 || round === 5) {
+        await assert.rejects(f.client.discover('bsc'), { code: expectedCode });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(f.client.lastDiscoveryHealth.complete, false);
+        if (round === 1) {
+          const retained = await f.client.live('bsc', { refresh: false });
+          assert.equal(retained.capturedAt, firstCapturedAt, 'failure cannot renew retained source clocks');
+          assert.equal(retained.tokens[0].stale, true);
+        }
+      } else {
+        await f.client.discover('bsc');
+        if (round === 0) firstCapturedAt = f.client.lastDiscoveryHealth.checkedAt;
+      }
+      if (round < 5) f.advance(300000);
+    }
+    assert.deepEqual(f.calls.map(path => Number(new URL(path, 'https://offline.invalid').searchParams.get('current_page'))),
+      [0, 1, 0, 2, 0, 1], expectedCode);
+    assert.equal(f.client.snapshot().metrics.estimatedCu, 30, expectedCode);
+    assert.ok(f.starts.slice(1).every((at, index) => at - f.starts[index] >= 300000), expectedCode);
+  }
+});
+
+test('schema-tail fallback still stops at an exhausted daily budget before the next head', async () => {
+  const f = fixture({ perPage: [[1], [2], [3]], caps: { 1: 9000000 }, enrichLimit: 0,
+    maxTrendingPages: 1, rotateTrendingPages: true, failPage: 1, pageFailure: 'SCHEMA',
+    minimumGapMs: 300000, dailyBudgetCu: 10 });
+  await f.client.hydrate();
+  await f.client.discover('bsc'); f.advance(300000);
+  await assert.rejects(f.client.discover('bsc'), { code: 'AVE_SCHEMA' });
+  f.advance(300000);
+  await assert.rejects(f.client.discover('bsc'), { code: 'AVE_BUDGET' });
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.client.snapshot().metrics.estimatedCu, 10);
 });
 
 test('four-minute round refreshes list membership and selected quotes; passive UI costs nothing', async () => {

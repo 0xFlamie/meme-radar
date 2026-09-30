@@ -61,7 +61,8 @@ test('AVE live endpoint allowlists fields, keeps quote expiry and supplies the a
   const elements = Object.fromEntries(['liveAuto', 'liveState', 'liveSearch', 'liveSort', 'liveMeta', 'liveRows']
     .map(id => [id, { value: '', textContent: '', innerHTML: '', hidden: false }]));
   const context = { Date: class extends Date { static now() { return now; } }, viewChain: 'bsc', liveData: response.body,
-    lastData: { scheduler: { enabledChains: ['bsc'] } }, liveEnabled: true, liveOffline: false, liveFingerprint: '', liveQueued: new Map(),
+    lastData: { scheduler: { enabledChains: ['bsc'] } }, liveEnabled: true, serviceOnline: true,
+    liveRefreshErrorChain: '', liveFingerprint: '', liveQueued: new Map(),
     rowsCache: [], backendDisposition: () => 'waiting',
     currentLocale: 'en', byId: id => elements[id], activeChain: () => 'bsc', t: key => key,
     number: (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback,
@@ -71,10 +72,21 @@ test('AVE live endpoint allowlists fields, keeps quote expiry and supplies the a
     voiceSpotlightRank: () => Infinity, voiceSpotlightKey: r => r.chain + ':' + r.address,
     voiceSpotlight: null, voiceSpotlightSelected: '', voiceSpotlightSignature: '', voiceSpotlightSnapshot: null };
   const poolStart = html.indexOf('function unifiedPoolRows('), poolEnd = html.indexOf('// Voice spotlight:', poolStart);
-  const start = html.indexOf('function renderLive()'), end = html.indexOf('async function refreshLive()', start);
+  const start = html.indexOf('function liveEmptyMessage('), end = html.indexOf('async function refreshLive()', start);
   const draw = html.slice(poolStart, poolEnd) + html.slice(start, end) + ';renderLive();';
   vm.runInNewContext(draw, context);
   assert.equal(elements.liveState.textContent, 'liveReady'); assert.equal(elements.liveState.hidden, false);
+  context.liveRefreshErrorChain = 'bsc';
+  vm.runInNewContext(draw, context);
+  assert.equal(elements.liveState.textContent, 'liveRefreshFailed', 'a feed error is not a local-service outage');
+  assert.match(elements.liveRows.innerHTML, /MOCK/, 'keep valid candidates during a transient feed failure');
+  context.serviceOnline = false;
+  vm.runInNewContext(draw, context);
+  assert.equal(elements.liveState.textContent, 'localOffline', 'status connection failure still reports offline');
+  context.serviceOnline = true; context.liveRefreshErrorChain = 'robinhood';
+  vm.runInNewContext(draw, context);
+  assert.equal(elements.liveState.textContent, 'liveReady', 'another chain failure cannot mark this chain offline');
+  context.liveRefreshErrorChain = '';
   context.lastData = { status: 'RUNNING', scheduler: { enabledChains: ['bsc'] },
     aveMarket: { pauseCode: null, nextAllowedAt: 0, recovery: { active: true } } };
   vm.runInNewContext(draw, context);
@@ -124,10 +136,40 @@ test('AVE live endpoint allowlists fields, keeps quote expiry and supplies the a
   // but its old evidence never regains audit eligibility or a fresh badge.
   context.liveData.rows = [row(now, { retainedSnapshot: true, displayEligible: true, evidenceStale: true,
     discoveryState: 'RETAINED', expiresAt: now - 1, stale: true, auditEligible: false,
+    displayUntil: now + 60000,
     firstSeenAt: now - 20 * 60_000, newAt: now - 20 * 60_000 })];
   vm.runInNewContext(draw, context);
   assert.match(elements.liveRows.innerHTML, /MOCK|liveRetained/);
   assert.doesNotMatch(elements.liveRows.innerHTML, /liveEligible|data-live-audit|voice-highlight/);
+  // A recently qualified retained receipt must not outrank fresh evidence,
+  // masquerade as new, or survive its server-supplied display deadline offline.
+  const retainedRow = { ...context.liveData.rows[0], symbol: 'RECEIPT', qualifiedAt: now - 1000 };
+  const freshRow = row(now, { address: '0x' + '9'.repeat(40), symbol: 'FRESH', qualifiedAt: now - 300000 });
+  for (const mode of ['new', 'priority', 'volume']) {
+    elements.liveSort.value = mode;
+    context.liveData.rows = [retainedRow, freshRow];
+    vm.runInNewContext(draw, context);
+    assert.ok(elements.liveRows.innerHTML.indexOf('FRESH') < elements.liveRows.innerHTML.indexOf('RECEIPT'), mode);
+    assert.doesNotMatch(elements.liveRows.innerHTML, /new-sighting/);
+  }
+  context.t = (key, args) => key === 'liveCardClocks' ? JSON.stringify(args) : key;
+  context.liveFingerprint = '';
+  vm.runInNewContext(draw, context);
+  assert.ok(elements.liveRows.innerHTML.includes(JSON.stringify({ first: String(freshRow.qualifiedAt), quote: String(freshRow.sourceUpdatedAt) })),
+    'first qualification and quote refresh are visibly separate clocks');
+  context.t = key => key;
+  for (const displayUntil of [now, now - 1, null, undefined]) {
+    context.serviceOnline = false;
+    context.liveData.rows = [{ ...retainedRow, displayUntil }];
+    vm.runInNewContext(draw, context);
+    assert.doesNotMatch(elements.liveRows.innerHTML, /RECEIPT/, 'expired receipts are removed even without a successful fetch');
+  }
+  context.serviceOnline = true;
+  for (const clocks of [{ expiresAt: now }, { sourceUpdatedAt: now - 60001 }, { sourceUpdatedAt: now + 1 }]) {
+    context.liveData.rows = [{ ...freshRow, ...clocks }];
+    vm.runInNewContext(draw, context);
+    assert.doesNotMatch(elements.liveRows.innerHTML, /FRESH/, 'client revalidates clocks instead of trusting a frozen READY flag');
+  }
   // A contract first seen earlier remains visible while a current snapshot
   // still passes. The old first-seen clock only prevents it looking newly seen.
   elements.liveSort.value = 'new';
@@ -209,6 +251,8 @@ test('live endpoint retains a passed display receipt without disguising it as fr
   assert.equal(response.body.rows[0].evidenceStale, true);
   assert.equal(response.body.rows[0].stale, true);
   assert.equal(response.body.rows[0].auditEligible, false);
+  assert.equal(response.body.rows[0].displayUntil, retained[0].displayUntil,
+    'browser receives the actual display deadline, not a renewed retention window');
   assert.equal(response.body.rows[0].sourceUpdatedAt, row(now).sourceUpdatedAt,
     'display retention must preserve the original AVE evidence clock');
   assert.equal(voiceSnapshot(state, ['bsc'], liveDiscovery).chains.bsc.length, 0,

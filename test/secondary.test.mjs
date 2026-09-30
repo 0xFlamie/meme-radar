@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DexBatchMarketOverlay, SecondaryValidator, secondaryChainSupport } from '../src/secondary.mjs';
+import { discoveryScreen } from '../src/scoring.mjs';
+import { config } from '../src/config.mjs';
 
 const evmAddress = '0x1111111111111111111111111111111111111111';
 const otherEvmAddress = '0x2222222222222222222222222222222222222222';
@@ -106,18 +108,100 @@ test('batch overlay never applies base-token price or market cap to a requested 
     baseToken: { address: third, symbol: 'BASE', name: 'Base' },
     quoteToken: { address: evmAddress, symbol: 'QUOTE', name: 'Quote' },
     pairAddress: '0x' + '8'.repeat(40), priceUsd: '999', marketCap: 999_999,
-    liquidity: { usd: 20_000 }, volume: { m5: 400 }, pairCreatedAt: at - 600_000
+    liquidity: { usd: 20_000 }, volume: { m5: 400 }, txns: { m5: { buys: 9, sells: 6 } }, pairCreatedAt: at - 600_000
   })]);
   const row = { address: evmAddress, chain: 'bsc', marketProvider: 'AVE', market_cap: 50_000, price: 1,
-    marketCapSourceUpdatedAt: at, marketCapCapturedAt: at, marketCapExpiresAt: at + 20_000 };
+    marketCapSourceUpdatedAt: at, marketCapCapturedAt: at, marketCapExpiresAt: at + 20_000,
+    buys_5m: 100, sells_5m: 200, buy_volume_5m: 1_000, sell_volume_5m: 2_000 };
   const [result] = await new DexBatchMarketOverlay({ fetchImpl, now: () => at }).enrich('bsc', [row], {
     minMarketCap: 10_000, maxMarketCap: 150_000
   });
   assert.equal(result.liquidity, 20_000);
   assert.equal(result.volume_5m, 400);
   assert.equal(result.market_cap, 50_000);
-  assert.equal(result.price, 1);
+  assert.equal(result.price, null, 'missing quote-token price cannot inherit a differently timed AVE price');
   assert.equal(result.marketOverlayPriceUpdated, false);
+  assert.equal(result.buys_5m, null, 'base-token direction is not quote-token direction');
+  assert.equal(result.sells_5m, null);
+  assert.equal(result.swaps_5m, 15, 'total pool transaction count has no token direction');
+  assert.equal(result.buy_volume_5m, null);
+  assert.equal(result.sell_volume_5m, null);
+});
+
+test('fresh DEX activity replaces old AVE counts and never renews unsupported USD buy/sell splits', async () => {
+  const at = 1_800_000_000_000;
+  const staleRow = { address: evmAddress, chain: 'bsc', marketProvider: 'AVE', market_cap: 50_000, price: 1,
+    capturedAt: at - 900_000, sourceUpdatedAt: at - 900_000, expiresAt: at - 870_000, stale: true,
+    buys_5m: 0, sells_5m: 0, swaps_5m: 0, buy_volume_5m: 0, sell_volume_5m: 0,
+    volume: 999, buys: 999, sells: 999, swaps: 999 };
+  const enrich = async (txns, row = staleRow) => (await new DexBatchMarketOverlay({ now: () => at,
+    fetchImpl: async () => jsonResponse([completeDexPair({ pairCreatedAt: at - 900_000, txns })])
+  }).enrich('bsc', [row]))[0];
+  const current = await enrich({ m5: { buys: 9, sells: 6 } });
+  assert.equal(current.buys_5m, 9);
+  assert.equal(current.sells_5m, 6);
+  assert.equal(current.swaps_5m, 15);
+  for (const field of ['buy_volume_5m', 'sell_volume_5m', 'volume', 'buys', 'sells', 'swaps']) assert.equal(current[field], null);
+  assert.equal(current.sourceUpdatedAt, at);
+  assert.equal(current.tokenSourceUpdatedAt, at - 900_000);
+  assert.equal(discoveryScreen(current, { ...config, chain: 'bsc' }, at / 1000).pass, true,
+    'old zero sell volume must not veto current two-sided transactions');
+  const noSells = await enrich({ m5: { buys: 9, sells: 0 } }, { ...staleRow,
+    buys_5m: 10, sells_5m: 10, swaps_5m: 20, buy_volume_5m: 500, sell_volume_5m: 500 });
+  assert.equal(noSells.buys_5m, 9);
+  assert.equal(noSells.sells_5m, 0, 'known current zero must not inherit old positive sells');
+  assert.equal(noSells.swaps_5m, 9);
+  assert.equal(noSells.sell_volume_5m, null, 'USD split is unknown, not a count-based estimate');
+  assert.equal(discoveryScreen(noSells, { ...config, chain: 'bsc' }, at / 1000).pass, false,
+    'current known zero sells cannot be approved using historical positive sells');
+  const noBuys = await enrich({ m5: { buys: 0, sells: 6 } });
+  assert.equal(noBuys.buys_5m, 0);
+  assert.equal(discoveryScreen(noBuys, { ...config, chain: 'bsc' }, at / 1000).pass, false);
+});
+
+test('DEX missing, partial or malformed trade counts remain unknown instead of inherited or fabricated zero', async () => {
+  const at = 1_800_000_000_000;
+  for (const bad of [undefined, null, '', false, true, -1, 1.5, '2 trades', [], {}, Number.MAX_SAFE_INTEGER + 1]) {
+    const [result] = await new DexBatchMarketOverlay({ now: () => at, fetchImpl: async () => jsonResponse([
+      completeDexPair({ pairCreatedAt: at - 900_000, txns: bad === undefined ? undefined : { m5: { buys: '9', sells: bad } } })
+    ]) }).enrich('bsc', [{ address: evmAddress, chain: 'bsc', marketProvider: 'AVE', market_cap: 50_000,
+      buys_5m: 123, sells_5m: 456, swaps_5m: 579, buy_volume_5m: 100, sell_volume_5m: 200,
+      buys: 123, sells: 456, swaps: 579 }]);
+    assert.equal(result.buys_5m, bad === undefined ? null : 9);
+    assert.equal(result.sells_5m, null);
+    assert.equal(result.swaps_5m, null);
+    assert.equal(result.sell_volume_5m, null);
+    const signals = discoveryScreen(result, { ...config, chain: 'bsc' }, at / 1000).signals;
+    assert.equal(signals.sells5m, null, 'generic old counters cannot fill a missing current DEX count');
+    assert.equal(signals.swaps5m, null);
+  }
+});
+
+test('DEX missing or invalid token price cannot refresh a stale AVE price into a READY candidate', async () => {
+  const at = 1_800_000_000_000;
+  const old = { address: evmAddress, chain: 'bsc', marketProvider: 'AVE', market_cap: 50_000, price: 123,
+    capturedAt: at - 900_000, sourceUpdatedAt: at - 900_000, expiresAt: at - 870_000, stale: true,
+    marketCapSourceUpdatedAt: at - 900_000, marketCapCapturedAt: at - 900_000, marketCapExpiresAt: at - 870_000 };
+  for (const priceUsd of [undefined, null, '', false, 'invalid', 0, -1]) {
+    let calls = 0;
+    const overlay = new DexBatchMarketOverlay({ now: () => at, fetchImpl: async () => {
+      calls++;
+      return jsonResponse([completeDexPair({ priceUsd, pairCreatedAt: at - 900_000, txns: { m5: { buys: 9, sells: 6 } } })]);
+    } });
+    const [current] = await overlay.enrich('bsc', [old]);
+    assert.equal(current.sourceUpdatedAt, at);
+    assert.equal(current.marketCapSourceUpdatedAt, at);
+    assert.equal(current.price, null);
+    assert.equal(current.marketOverlayPriceUpdated, false);
+    const screen = discoveryScreen(current, { ...config, chain: 'bsc' }, at / 1000);
+    assert.equal(screen.pass, false);
+    assert.ok(screen.reasons.includes('价格数据未知'));
+    assert.equal((await overlay.enrich('bsc', [{ ...current, price: 123 }]))[0].price, null,
+      'a cached pool response cannot revive a carried-over price either');
+    assert.equal(calls, 1, 'the safety fix must not make an extra API request');
+  }
+  assert.equal(old.price, 123, 'the source observation remains unchanged');
+  assert.equal(old.sourceUpdatedAt, at - 900_000);
 });
 
 test('batch overlay never mixes a different Dex pool with pair-scoped AVE evidence', async () => {

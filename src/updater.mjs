@@ -25,7 +25,7 @@ const errors = {
   UPDATE_CHECKSUM: '发布文件校验未通过，已停止更新', UPDATE_ARCHIVE: '发布包结构不安全或不受支持',
   UPDATE_BUSY: '已有更新正在进行，请勿重复提交', UPDATE_VERSION: '只允许更新到明确发布的更高稳定版本',
   UPDATE_PLATFORM: '仅支持 Windows x64 便携包及 macOS arm64/x64 发布源码包',
-  UPDATE_DEPENDENCIES: '新版本依赖发生变化或未安装，当前版本保留；本轮自动更新只支持已验证的相同依赖',
+  UPDATE_DEPENDENCIES: '候选版不符合零第三方依赖的发行清单，当前版本保留',
   UPDATE_HANDOFF: '旧进程未正常退出，未替换当前版本', UPDATE_START: '新版本健康检查失败，已尝试恢复原版本',
 };
 const fixed = error => error instanceof UpdateError ? error : new UpdateError('UPDATE_STORAGE', errors.UPDATE_STORAGE);
@@ -71,20 +71,18 @@ function manifest(root) {
   if (value.name !== 'meme-radar-open-source' || !validVersion(value.version) || value.private !== true) fail('UPDATE_LOCAL', errors.UPDATE_LOCAL);
   return value;
 }
-function dependencyLockFingerprint(root) {
-  let value;
-  try { value = json(path.join(root, 'package-lock.json')); }
+function verifyDependencyFreeRelease(root) {
+  let value, pkg;
+  try { value = json(path.join(root, 'package-lock.json')); pkg = manifest(root); }
   catch { fail('UPDATE_DEPENDENCIES', errors.UPDATE_DEPENDENCIES); }
-  if (!object(value) || !Number.isInteger(value.lockfileVersion) || !object(value.packages) || !object(value.packages[''])) {
+  const emptyDependencies = source => ['dependencies', 'optionalDependencies', 'devDependencies']
+    .every(field => source[field] === undefined || object(source[field]) && Object.keys(source[field]).length === 0);
+  if (!object(value) || !Number.isInteger(value.lockfileVersion) || !object(value.packages) || !object(value.packages[''])
+    || value.name !== pkg.name || value.version !== pkg.version || value.packages[''].version !== pkg.version
+    || !emptyDependencies(pkg) || !emptyDependencies(value.packages[''])
+    || Object.keys(value.packages).some(name => name !== '') || fs.existsSync(path.join(root, 'node_modules'))) {
     fail('UPDATE_DEPENDENCIES', errors.UPDATE_DEPENDENCIES);
   }
-  // npm repeats the application version in these two places. A normal app
-  // upgrade changes both even when the dependency graph is byte-for-byte the
-  // same, so compare the lock after removing only those version fields.
-  value = structuredClone(value);
-  delete value.version;
-  delete value.packages[''].version;
-  return sha(Buffer.from(JSON.stringify(value)));
 }
 
 // In-process ZIP extraction: no shell, external archiver, links, ZIP64 or path
@@ -275,12 +273,9 @@ export function createUpdater({ root, port = 3791, fetchImpl = fetch, now = Date
         if (stopped || controller.signal.aborted) fail('UPDATE_HANDOFF', errors.UPDATE_HANDOFF);
         work = fs.mkdtempSync(path.join(parent, '.meme-radar-update-')); fs.chmodSync(work, 0o700);
         const next = path.join(work, 'next'); extract(files, next);
-        if (platform === 'darwin') {
-          let dependency; try { within(root, 'node_modules/gmgn-cli/package.json'); dependency = json(path.join(root, 'node_modules/gmgn-cli/package.json')); } catch { fail('UPDATE_DEPENDENCIES', errors.UPDATE_DEPENDENCIES); }
-          if (dependencyLockFingerprint(root) !== dependencyLockFingerprint(next)
-            || dependency.version !== manifest(next).dependencies?.['gmgn-cli']) fail('UPDATE_DEPENDENCIES', errors.UPDATE_DEPENDENCIES);
-          copyTree(path.join(root, 'node_modules'), path.join(next, 'node_modules'), { links: true });
-        }
+        // A verified legacy baseline may contain dependencies. Keep that tree
+        // in its original backup; never require or copy it into the AVE build.
+        verifyDependencyFreeRelease(next);
         const expected = baseline.map(({ name, sha256 }) => ({ name, sha256 }));
         const plan = { schema: 1, root, work, port, platform, arch, parentPid: process.pid, oldVersion: currentVersion, version: latest.version,
           execPath: process.execPath, expected, staged: files.map(({ name, sha256 }) => ({ name, sha256 })), lockFile };

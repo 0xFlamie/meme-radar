@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { config, ROOT } from './config.mjs';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { AveClient } from './ave.mjs';
 import { createAveSettings } from './ave-settings.mjs';
 import { RadarState } from './state.mjs';
@@ -12,6 +12,20 @@ import { RadarControls } from './local-store.mjs';
 import { LiveDiscovery } from './live-discovery.mjs';
 import { configureWindowsSystemProxy } from './windows-proxy.mjs';
 
+// Windows portable supervisor bridge: keep the packaged EXE launcher intact.
+const once = process.argv.includes('--once');
+if (process.platform === 'win32' && !once && process.env.RADAR_SUPERVISED !== '1'
+  && resolve(process.execPath).toLowerCase() === resolve(ROOT, 'runtime', 'node.exe').toLowerCase()) {
+  try {
+    const { superviseRadar } = await import('../scripts/supervise.mjs');
+    await superviseRadar();
+    process.exit(0);
+  } catch (error) {
+    console.error('守护启动未完成：' + error.message);
+    process.exit(1);
+  }
+}
+
 // Browsers use the Windows system proxy automatically, while Node normally
 // only sees proxy environment variables. Mirror the effective Windows proxy
 // before AVE reads begin so the portable build follows the same
@@ -21,23 +35,25 @@ if (process.platform === 'win32') {
   console.log(proxy.proxy ? '已接入 Windows 系统网络代理。' : '未检测到 Windows 系统代理，将使用直连网络。');
 }
 
-const once = process.argv.includes('--once');
 const state = new RadarState(config.stateDir);
 let scanner;
 // Production discovery deliberately performs one hot-list read per turn. The
 // current AVE head response already carries the card fields; pagination and
 // automatic per-token completion must not amplify a shared-key rate limit.
+const sharedRequestIntervalMs = 5 * 60_000;
 const market = new AveClient({ directory: config.stateDir, apiKeyProvider: () => ave.getKey(), enrichLimit: 0,
-  maxTrendingPages: 1, rotateTrendingPages: true, minimumGapMs: 5 * 60_000 });
+  maxTrendingPages: 1, rotateTrendingPages: true, minimumGapMs: sharedRequestIntervalMs });
 const ave = createAveSettings({ directory: config.stateDir,
   verifyData: key => market.verifyApiKey(key),
   onChange: () => { market.resetCredentials(); scanner?.requestCycle(); }
 });
-// Keep old history and credentials on disk, but never reuse a GMGN pass as
-// current AVE evidence. No GMGN client, worker or key store is loaded here.
+// Keep old history and credentials on disk, but never reuse a previous
+// provider's pass or an unlabelled baseline as current AVE evidence.
 if (state.value.scanProvider !== 'AVE') {
   for (const scope of [state.value, ...Object.values(state.value.chainStates || {})]) {
+    for (const row of scope.outcomes || []) row.baselineProvider ||= 'LEGACY_UNKNOWN';
     for (const row of scope.candidates || []) {
+      row.marketProvider ||= 'LEGACY_UNKNOWN';
       if (row.status === 'X_REVIEW') {
         row.status = 'WAIT_RECHECK'; row.staleAt = 0;
         row.deep = { ...row.deep, chainPass: false };
@@ -49,7 +65,7 @@ if (state.value.scanProvider !== 'AVE') {
   state.value.scanProvider = 'AVE'; state.save();
 }
 const controls = new RadarControls(config.stateDir, config.supportedChains, state.value.activeChain || config.chain);
-scanner = new Scanner({ provider: market, secondary: new SecondaryValidator(), state, controls });
+scanner = new Scanner({ provider: market, secondary: new SecondaryValidator(), state, controls, sharedRequestIntervalMs });
 const liveDiscovery = new LiveDiscovery({ provider: market, cacheOnly: true, marketOverlay: new DexBatchMarketOverlay() });
 const version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
 
@@ -69,6 +85,7 @@ const server = createServer({
   supportedChains: config.supportedChains,
   switchChain: chain => scanner.switchChain(chain),
   getAveConnection: () => ave.snapshot(),
+  getSchedulerStatus: chain => scanner.scheduleSnapshot(chain),
   getMarketStatus: () => market.snapshot()
 });
 server.requestTimeout = 10_000;

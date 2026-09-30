@@ -22,6 +22,30 @@ const AVE_PAUSES = Object.freeze({
   AVE_QUOTA: { status: 'QUOTA_PAUSED', message: 'AVE 配额不足，已暂停行情请求；不会自动购买额度。' },
   AVE_RATE_LIMITED: { status: 'RATE_LIMITED', message: 'AVE 行情请求已限流，冷却结束后再继续。' }
 });
+const FAILURE_EVENTS = Object.freeze({
+  ...Object.fromEntries(Object.entries(AVE_PAUSES).map(([code, value]) => [code, { type: value.status, message: value.message }])),
+  AVE_AUTH: { type: 'AUTH', message: 'AVE 行情凭证或权限未通过，请检查连接。' },
+  AVE_CONFIG: { type: 'AUTH', message: 'AVE 行情凭证尚未配置。' },
+  AVE_DISABLED: { type: 'AUTH', message: 'AVE 行情访问已暂停。' },
+  AVE_TIMEOUT: { type: 'TIMEOUT', message: 'AVE 行情响应超时，等待下一轮调度。' },
+  AVE_NETWORK: { type: 'NETWORK', message: 'AVE 行情连接失败，等待下一轮调度。' },
+  AVE_SCHEMA: { type: 'ERROR', message: 'AVE 行情格式或身份未通过核验。' },
+  AVE_SIZE: { type: 'ERROR', message: 'AVE 行情响应超过大小限制。' },
+  AVE_UPSTREAM: { type: 'ERROR', message: 'AVE 上游响应未成功，等待下一轮调度。' },
+  AVE_BUDGET_STORE: { type: 'ERROR', message: '本机行情预算无法安全保存，已暂停请求。' },
+  AVE_DISCOVERY_RESERVE: { type: 'BUDGET_PAUSED', message: '为保留发现额度，补充核验暂缓。' },
+  AVE_CHANGED: { type: 'ERROR', message: 'AVE 配置已变化，本次数据未采用。' },
+  AVE_ABORTED: { type: 'ERROR', message: '本次行情请求已取消，未采用未完成结果。' },
+  AVE_BUSY: { type: 'ERROR', message: 'AVE 行情队列已满，等待下一轮调度。' },
+  AVE_INPUT: { type: 'ERROR', message: 'AVE 只读请求参数未通过核验。' },
+  AVE_REQUEST_FAILED: { type: 'ERROR', message: '本轮扫描未完成，具体原因尚未分类。' }
+});
+function failureEvent(error, stage) {
+  const code = typeof error?.code === 'string' && Object.hasOwn(FAILURE_EVENTS, error.code) ? error.code : 'AVE_REQUEST_FAILED';
+  const failure = FAILURE_EVENTS[code];
+  return { code, stage, type: stage === 'audit' && code === 'AVE_REQUEST_FAILED' ? 'AUDIT_RETRY' : failure.type,
+    message: stage === 'audit' ? `深审：${failure.message}` : failure.message };
+}
 function providerPause(provider, now) {
   let code; try { code = provider.snapshot?.().pauseCode; } catch { /* Public health is optional for old clients. */ }
   if (code !== 'AVE_TOTAL_BUDGET' && !(provider.nextAllowedAt > now)) return null;
@@ -41,7 +65,7 @@ const OUTCOME_SAMPLE_GRACE_MS = 5 * 60_000;
 const REQUIRED_CALIBRATION_WINDOWS = Object.freeze(['m30', 'h2', 'h24']);
 const CHAIN_SCOPE_KEYS = Object.freeze([
   'scanCount', 'discoveredCount', 'prequalifiedCount', 'candidates', 'rejected',
-  'auditQueue', 'auditQueueStats', 'liveLeads', 'outcomes', 'outcomeSummary', 'sourceHealth',
+  'auditQueue', 'auditQueueStats', 'liveLeads', 'outcomes', 'outcomeSummary', 'sourceHealth', 'screening',
   'lastAttemptAt', 'lastSuccessAt', 'lastCompleteSuccessAt', 'lastCycleMs', 'retryAt', 'status', 'generatedAt', 'nextCycleAt'
 ]);
 const RESERVED_X_PATHS = new Set([
@@ -67,14 +91,14 @@ export function twitterHandle(value) {
 
 function cleanCandidate(row, defaultChain = '') {
   if (!row || typeof row !== 'object') return row;
-  const { rawDiscovery: _rawDiscovery, socialHints: _socialHints, ...clean } = row;
+  const { rawDiscovery: _rawDiscovery, socialHints: _socialHints, gmgnUrl: _legacyUrl, ...clean } = row;
   if (clean.status === 'QUALIFIED') clean.status = 'X_REVIEW';
   if (clean.status === 'REJECTED') clean.status = 'HARD_REJECT';
   if (!clean.chain && defaultChain) clean.chain = defaultChain;
-  if (clean.status === 'X_REVIEW' && clean.deep?.chartRisk?.version !== CHART_RISK_VERSION) {
+  if (clean.status === 'X_REVIEW' && (clean.marketProvider !== 'AVE' || clean.deep?.chartRisk?.version !== CHART_RISK_VERSION)) {
     clean.status = 'WAIT_RECHECK';
     clean.deep = { ...clean.deep, chainPass: false };
-    clean.decisionReason = '风险规则已升级，等待重新核验';
+    clean.decisionReason = clean.marketProvider !== 'AVE' ? '历史来源待重新核验' : '风险规则已升级，等待重新核验';
   }
   return clean;
 }
@@ -112,12 +136,11 @@ function publicToken(row, screen, chain) {
     ageSec: screen.ageSec,
     priorityBand: screen.priorityBand,
     discoveryScore: screen.score,
-    holders: row.marketProvider === 'AVE' ? numberOrNull(row.holder_count) : num(row.holder_count),
-    volume1h: row.marketProvider === 'AVE' ? numberOrNull(row.volume_1h) : num(first(row.volume_1h, row.volume)),
-    buys: row.marketProvider === 'AVE' ? numberOrNull(row.buys_5m) : num(first(row.buys_24h, row.buys)),
-    sells: row.marketProvider === 'AVE' ? numberOrNull(row.sells_5m) : num(first(row.sells_24h, row.sells)),
+    holders: numberOrNull(row.holder_count),
+    volume1h: numberOrNull(row.volume_1h),
+    buys: numberOrNull(row.buys_5m),
+    sells: numberOrNull(row.sells_5m),
     twitter: twitterHandle(twitter),
-    gmgnUrl: String(row.link?.gmgn || ''),
     socialHints: {
       followerCount: num(first(row.x_user_follower, row.x_follower)),
       duplicateSocial
@@ -223,9 +246,14 @@ function buildQueue(previous, prequalified, now, settings) {
   for (const { row, screen } of prequalified) {
     const address = addressKey(row.address);
     const old = byAddress.get(address);
+    const oldQualifiedAt = numberOrNull(old?.qualifiedAt);
     byAddress.set(address, {
       address: String(row.address),
       firstSeenAt: num(old?.firstSeenAt, now),
+      // Favorites and prior reviews may enter this queue without passing the
+      // market screen. Their queue-arrival time is not qualification proof.
+      qualifiedAt: oldQualifiedAt > 0 && oldQualifiedAt <= now ? oldQualifiedAt
+        : screen.pass === true && row._monitorOnly !== true ? now : null,
       lastSeenAt: now,
       lastAuditedAt: num(old?.lastAuditedAt),
       nextAuditAt: num(old?.nextAuditAt),
@@ -257,9 +285,26 @@ function queueStats(queue, availableAddresses, now, settings) {
   };
 }
 
+// Last-scan counts describe market filtering only, never a safety verdict.
+// Count a token once per category even when several checks share a reason.
+export function screeningSummary(screened, checkedAt) {
+  const reasonCounts = Object.fromEntries(['stale', 'missing_market', 'market_cap', 'age', 'liquidity', 'activity', 'known_risk', 'other'].map(key => [key, 0]));
+  const category = reason => /过期|时间待更新/.test(reason) ? 'stale'
+    : /未知|缺少|待核验|未核验|未确认/.test(reason) ? 'missing_market'
+      : /市值/.test(reason) ? 'market_cap' : /不足5分钟|观察.*龄|观察年龄/.test(reason) ? 'age'
+        : /流动性/.test(reason) ? 'liquidity' : /成交|买入额|卖出额/.test(reason) ? 'activity'
+          : /风险|貔貅|卖出受限|刷量|内幕|捆绑|DEV|交易税|历史高点/.test(reason) ? 'known_risk' : 'other';
+  for (const { screen } of screened) {
+    if (screen.pass) continue;
+    for (const key of new Set((screen.reasons || []).map(category))) reasonCounts[key]++;
+  }
+  return { checkedAt, received: screened.length, marketQualified: screened.filter(item => item.screen.pass).length,
+    filtered: screened.filter(item => !item.screen.pass).length, reasonCounts };
+}
+
 function tokenPrice(row, now = Date.now()) {
   if (row?.marketProvider === 'AVE') return tokenInfoPrice(row, now);
-  return numberOrNull(first(row?.price, row?.price_usd, row?.usd_price));
+  return null;
 }
 
 export function updateOutcomeTracking(outcomes, discoveredByAddress, now, retentionMs, sampleGraceMs = OUTCOME_SAMPLE_GRACE_MS) {
@@ -268,12 +313,12 @@ export function updateOutcomeTracking(outcomes, discoveredByAddress, now, retent
     .filter(item => ['X_REVIEW', 'HARD_REJECT'].includes(item?.initialDecision))
     .filter(item => now - num(item.baselineAt) <= retentionMs).map(item => {
     const row = discoveredByAddress.get(addressKey(item.address));
-    if (row && (row.marketProvider || 'GMGN') !== (item.baselineProvider || 'GMGN')) return item;
+    if (row?.marketProvider !== 'AVE' || item.baselineProvider !== 'AVE') return item;
     const price = tokenPrice(row, now);
-    if (row?.marketProvider === 'AVE' && (item.chain && row.chain !== item.chain || addressKey(row.address) !== addressKey(item.address))) return item;
+    if (item.chain && row.chain !== item.chain || addressKey(row.address) !== addressKey(item.address)) return item;
     if (!(price > 0) || !(item.baselinePrice > 0)) return item;
     const samples = { ...(item.samples || {}) };
-    const sampledAt = row?.marketProvider === 'AVE' ? numberOrNull(row.sourceUpdatedAt) : now;
+    const sampledAt = numberOrNull(row.sourceUpdatedAt);
     if (!(sampledAt > 0) || sampledAt > now) return item;
     const elapsedMs = sampledAt - item.baselineAt;
     for (const [key, windowMs] of Object.entries(OUTCOME_WINDOWS)) {
@@ -306,7 +351,7 @@ export function upsertOutcome(outcomes, candidate, now) {
     symbol: candidate.symbol,
     baselineAt: now,
     baselinePrice: candidate.price,
-    baselineProvider: candidate.marketProvider || 'GMGN',
+    baselineProvider: candidate.marketProvider || 'LEGACY_UNKNOWN',
     initialDecision: 'X_REVIEW',
     latestDecision: candidate.status,
     latestFailed: candidate.deep?.failed || [],
@@ -359,7 +404,7 @@ function emptyScope() {
       tracked: 0, completed5m: 0, completed15m: 0, completed30m: 0,
       completed1h: 0, completed2h: 0, completed6h: 0, completed24h: 0
     },
-    sourceHealth: {}, lastAttemptAt: 0, lastSuccessAt: 0, lastCompleteSuccessAt: 0,
+    sourceHealth: {}, screening: null, lastAttemptAt: 0, lastSuccessAt: 0, lastCompleteSuccessAt: 0,
     lastCycleMs: 0, retryAt: 0
   };
 }
@@ -371,25 +416,70 @@ function addEvent(events, type, message, chain, data = {}) {
 }
 
 export class Scanner {
-  constructor({ provider, gmgn, secondary = null, state, controls = null, settings = config }) {
-    this.provider = provider || gmgn;
-    this.gmgn = this.provider; // Legacy test/integration alias; production passes AVE as provider.
-    this.providerName = provider ? 'AVE' : 'GMGN';
+  constructor({ provider, secondary = null, state, controls = null, settings = config, sharedRequestIntervalMs = 5 * 60_000 }) {
+    this.provider = provider;
     this.cycleController = null;
     this.secondary = secondary;
     this.state = state;
     this.controls = controls;
     this.config = settings;
+    this.sharedRequestIntervalMs = Math.max(0, num(sharedRequestIntervalMs));
     this.supportedChains = [...settings.supportedChains];
     this.activeChain = this.supportedChains.includes(state.value.activeChain) ? state.value.activeChain : settings.chain;
     this.pendingChain = '';
     this.timer = null;
+    this.nextTickAt = 0;
     this.running = false;
     this.rescanRequested = false;
     this.stopped = false;
     this.requestedReviews = new Map();
     this.state.value.activeChain = this.activeChain;
     this.state.value.supportedChains = this.supportedChains;
+  }
+
+  schedulingPool(marketState = {}) {
+    const enabled = [...new Set(this.controls?.value.enabledChains || [this.activeChain])]
+      .filter(chain => this.supportedChains.includes(chain));
+    const documented = chain => marketState.chains?.[chain]?.documented === true;
+    return marketState.recovery?.active && enabled.some(documented) ? enabled.filter(documented) : enabled;
+  }
+
+  scheduleSnapshot(selectedChain = this.activeChain, now = Date.now()) {
+    let market = {}; try { market = this.provider.snapshot?.() || {}; } catch { /* No fabricated provider health. */ }
+    const enabledChains = [...new Set(this.controls?.value.enabledChains || [this.activeChain])]
+      .filter(chain => this.supportedChains.includes(chain));
+    const eligibleChains = this.schedulingPool(market);
+    const scope = chain => chain === this.activeChain ? this.state.value : this.state.value.chainStates?.[chain];
+    const order = [...eligibleChains].sort((a, b) => {
+      // An in-flight turn already occupies its slot; forecast the remaining
+      // chains first without pretending its completion time is known.
+      if (a === b) return 0;
+      if (this.running && (a === this.activeChain || b === this.activeChain)) return a === this.activeChain ? 1 : -1;
+      return num(scope(a)?.lastAttemptAt) - num(scope(b)?.lastAttemptAt);
+    });
+    const sharedIntervalMs = Math.max(this.sharedRequestIntervalMs, num(market.transport?.spacingMs),
+      Math.max(30_000, this.config.scanIntervalMs / Math.max(1, enabledChains.length)));
+    const selectedEnabled = enabledChains.includes(selectedChain), position = order.indexOf(selectedChain);
+    const manual = market.manualResetRequired === true || market.pauseCode === 'AVE_TOTAL_BUDGET';
+    const auth = this.provider.disabled === true || this.state.value.status === 'AVE_AUTH_REQUIRED';
+    const blocked = this.stopped || manual || auth;
+    const nextSharedAttemptAt = blocked || !order.length ? null : Math.max(now, this.nextTickAt,
+      providerReadyAt(this.provider), this.running ? now + sharedIntervalMs : 0);
+    const inProgress = this.running && selectedChain === this.activeChain;
+    const unavailable = blocked || !selectedEnabled || position < 0;
+    return {
+      scope: 'shared-provider', sharedIntervalMs, eligibleChains, selectedChain, selectedEnabled,
+      nominalChainIntervalMs: sharedIntervalMs * eligibleChains.length,
+      queuePosition: unavailable || inProgress ? null : position + 1,
+      nextSharedAttemptAt,
+      selectedNextAttemptAt: unavailable || inProgress || nextSharedAttemptAt === null ? null
+        : nextSharedAttemptAt + position * sharedIntervalMs,
+      estimate: unavailable ? 'unavailable' : inProgress ? 'in_progress' : 'earliest',
+      reason: this.stopped ? 'stopped' : manual ? 'manual_reset_required' : auth ? 'auth_required'
+        : !selectedEnabled ? 'disabled' : position < 0 ? 'recovery_chain_deferred' : inProgress ? 'scanning'
+          : this.provider.nextAllowedAt > now ? 'backoff' : 'shared_cadence',
+      guaranteed: false
+    };
   }
 
   activateChain(chain, quiet = false) {
@@ -400,6 +490,7 @@ export class Scanner {
     this.state.value = {
       ...this.state.value,
       ...structuredClone(restored),
+      screening: restored.screening || null,
       chainStates,
       activeChain: chain,
       pendingChain: '',
@@ -460,7 +551,8 @@ export class Scanner {
     if (row?.address && this.state.value.riskExclusions?.[tokenKey(chain, row.address)]) return { accepted: false, reason: 'risk_excluded' };
     const enabled = this.controls?.value.enabledChains || [this.activeChain];
     if (!enabled.includes(chain)) return { accepted: false, reason: 'chain_not_scanning' };
-    if (!row || !discoveryScreen(row, { ...this.config, chain }).pass) return { accepted: false, reason: 'outside_audit_scope' };
+    if (row?.marketProvider !== 'AVE' || !discoveryScreen(row, { ...this.config, chain }).pass) return { accepted: false, reason: 'outside_audit_scope' };
+    if (!(this.config.maxDeepAuditsPerCycle > 0)) return { accepted: false, reason: 'deep_audit_disabled' };
     const scope = this.activeChain === chain ? this.state.value : this.state.value.chainStates?.[chain];
     const queued = scope?.auditQueue?.find(item => addressKey(item.address) === addressKey(row.address));
     if (queued?.status === 'HARD_REJECT' && queued.nextAuditAt > Date.now()) return { accepted: false, reason: 'risk_rejected' };
@@ -505,8 +597,8 @@ export class Scanner {
       if (!await this.provider.configured()) {
         const next = {
           ...prior,
-          status: this.providerName + '_AUTH_REQUIRED',
-          authMessage: '请在页面输入 ' + this.providerName + ' 只读 API Key 并点击确认，验证成功后开始扫描',
+          status: 'AVE_AUTH_REQUIRED',
+          authMessage: '请在页面输入 AVE 只读 API Key 并点击确认，验证成功后开始扫描',
           activeChain: chain,
           supportedChains: this.supportedChains,
           scanInProgress: false,
@@ -514,7 +606,7 @@ export class Scanner {
           generatedAt: Date.now(),
           nextCycleAt: Date.now() + settings.scanIntervalMs
         };
-        next.events = addEvent(prior.events, 'AUTH', this.providerName + ' API尚未配置，真实扫描未启动', chain);
+        next.events = addEvent(prior.events, 'AUTH', 'AVE API尚未配置，真实扫描未启动', chain, { stage: 'discovery' });
         this.state.save(next);
         return;
       }
@@ -523,6 +615,7 @@ export class Scanner {
       let discovered = await this.provider.discover(chain, { signal: controller.signal });
       if (controller.signal.aborted) return;
       if (this.provider.keyEpoch !== keyEpoch) return;
+      discovered = discovered.filter(row => row?.marketProvider === 'AVE');
       const reviewRequests = [...this.requestedReviews.values()].filter(item => item.chain === chain
         && item.epoch === keyEpoch && Date.now() - item.at <= 10 * 60000);
       // Current discovery wins over a queued preview snapshot when both exist.
@@ -721,13 +814,13 @@ export class Scanner {
             status: secondary.status,
             sources: secondary.sources
           };
-          if ((audit._meta?.provider === 'AVE' ? audit._meta.transportComplete === false : audit._meta?.complete === false) && !audit._meta?.earlyExit) auditHadError = true;
+          if (audit._meta?.transportComplete === false && !audit._meta?.earlyExit) auditHadError = true;
           if (secondary && secondary.status === 'DEGRADED'
             && Object.values(secondary.sources || {}).some(source => source?.status !== 'UNSUPPORTED')) auditHadError = true;
           const label = { X_REVIEW: '链上通过，待人工看X', WAIT_RECHECK: '等待短时复查', HARD_REJECT: '永久安全拒绝' }[candidate.status];
           events = addEvent(events, candidate.status, `${token.symbol}：${label}`, chain, { address: token.address });
           outcomes = upsertOutcome(outcomes, candidate, auditedAt);
-          if (candidate.marketProvider !== 'AVE' || tokenInfoPrice(candidate, auditedAt)) outcomes = sampleRejected(outcomes, candidate, candidate.marketProvider === 'AVE' ? candidate.sourceUpdatedAt : auditedAt);
+          if (candidate.marketProvider === 'AVE' && tokenInfoPrice(candidate, auditedAt)) outcomes = sampleRejected(outcomes, candidate, candidate.sourceUpdatedAt);
         } catch (error) {
           if (controller.signal.aborted || this.provider.keyEpoch !== keyEpoch) return;
           if (['AVE_DISCOVERY_RESERVE', 'AVE_BUDGET', 'AVE_HOURLY_BUDGET', 'AVE_TOTAL_BUDGET'].includes(error?.code)) {
@@ -739,6 +832,7 @@ export class Scanner {
           }
           auditHadError = true;
           const auditedAt = Date.now();
+          const failure = failureEvent(error, 'audit');
           const queueItem = queueByAddress.get(addressKey(token.address));
           Object.assign(queueItem, {
             lastAuditedAt: auditedAt,
@@ -752,19 +846,19 @@ export class Scanner {
             status: 'WAIT_RECHECK',
             auditedAt,
             staleAt: auditedAt + settings.staleCandidateMs,
-            auditError: String(error?.message || '深度审计暂时失败，等待复查')
+            auditError: failure.message
             ,reviewRevision: `error-${auditedAt}`
           });
-          lastAuditHealth = { complete: false, transportComplete: false, checkedAt: auditedAt, code: String(error?.code || this.providerName + '_REQUEST_FAILED') };
-          events = addEvent(events, 'AUDIT_RETRY', `${token.symbol}：深审暂时失败，已进入复查队列`, chain, { address: token.address });
-          if (error?.code === 'GMGN_RATE_LIMITED' || AVE_PAUSES[error?.code]) break;
+          lastAuditHealth = { complete: false, transportComplete: false, checkedAt: auditedAt, code: failure.code };
+          events = addEvent(events, failure.type, failure.message, chain, { address: token.address, code: failure.code, stage: failure.stage });
+          if (Object.hasOwn(AVE_PAUSES, failure.code)) break;
         }
         auditsCompleted++;
       }
 
       const outcomeScopes = { ...Object.fromEntries(Object.entries(prior.chainStates || {}).map(([id, scope]) => [id, scope.outcomes || []])), [chain]: outcomes };
       const sampleJobs = selectOutcomeJobs(outcomeScopes, { enabledChains: this.controls?.value.enabledChains || [chain],
-        provider: this.providerName, limit: settings.outcomeReadsPerCycle, now: Date.now() });
+        provider: 'AVE', limit: settings.outcomeReadsPerCycle, now: Date.now() });
       for (const job of sampleJobs) {
         if (this.provider.snapshot?.().recovery?.auditAllowed === false) break;
         if (controller.signal.aborted || this.provider.disabled || this.provider.nextAllowedAt > Date.now()) break;
@@ -792,8 +886,7 @@ export class Scanner {
         createdAt: item.screen.createdAt ?? createdAt(item.row), reasons: item.screen.reasons
       }));
       const discoveryHealth = this.provider.lastDiscoveryHealth || { complete: true, checkedAt: now };
-      const observationAt = this.providerName === 'AVE'
-        ? Math.min(now, num(discoveryHealth.checkedAt)) : now;
+      const observationAt = Math.min(now, num(discoveryHealth.checkedAt));
       const liveConfirmedAt = observationAt > 0 ? observationAt : now;
       const hardRejectedAddresses = new Set([
         ...candidates.filter(row => ['HARD_REJECT', 'REJECTED'].includes(row.status)),
@@ -819,11 +912,11 @@ export class Scanner {
           liveObservations.push({ address: lead.address, eligible: false, hardRejected: true });
         }
       }
-      const liveLeads = this.providerName === 'AVE' ? reconcileLiveLeads(prior.liveLeads, liveObservations, {
+      const liveLeads = reconcileLiveLeads(prior.liveLeads, liveObservations, {
         chain,
         confirmedAt: liveConfirmedAt,
         retentionMs: settings.liveLeadRetentionMs
-      }) : [];
+      });
       const degraded = discoveryHealth.complete === false || auditHadError;
       const pause = budgetPause || providerPause(this.provider, now);
       const next = {
@@ -847,6 +940,7 @@ export class Scanner {
         scanCount: num(prior.scanCount) + 1,
         discoveredCount: discovered.length,
         prequalifiedCount: prequalified.length,
+        screening: screeningSummary(screened, now),
         candidates,
         rejected,
         auditQueue,
@@ -869,16 +963,17 @@ export class Scanner {
       if (controller.signal.aborted) return;
       if (this.provider.keyEpoch !== keyEpoch) return;
       if (chain !== this.activeChain) return;
-      const rateLimited = error?.code === 'GMGN_RATE_LIMITED' || /请求频率超限/.test(error?.message || '');
+      const rateLimited = error?.code === 'AVE_RATE_LIMITED';
       const now = Date.now();
-      const pause = AVE_PAUSES[error?.code];
       const auth = ['AVE_CONFIG', 'AVE_AUTH', 'AVE_DISABLED'].includes(error?.code);
+      const failure = failureEvent(error, 'discovery');
+      const pause = Object.hasOwn(AVE_PAUSES, failure.code) ? AVE_PAUSES[failure.code] : null;
       const retryAt = numberOrNull(error?.retryAt) ?? (rateLimited ? now + num(error?.retryAfterMs, 30_000) : 0);
       const next = {
         ...prior,
         status: pause?.status || (auth ? 'AVE_AUTH_REQUIRED' : rateLimited ? 'RATE_LIMITED' : 'ERROR'),
-        error: pause?.message || (this.providerName === 'AVE' ? auth ? 'AVE 行情凭证未配置或权限未通过，请重新连接。' : 'AVE 本轮行情读取失败，等待下一次复查。' : String(error?.message || '扫描暂时失败，下一轮将自动重试。')),
-        pauseCode: pause ? error.code : null,
+        error: failure.message,
+        pauseCode: pause ? failure.code : null,
         retryAt,
         activeChain: chain,
         supportedChains: this.supportedChains,
@@ -890,14 +985,14 @@ export class Scanner {
         sourceHealth: {
           ...(prior.sourceHealth || {}),
           discovery: {
-            provider: this.providerName,
+            provider: 'AVE',
             complete: false,
             checkedAt: now,
-            trending: { ok: false, state: 'error', code: String(error?.code || this.providerName + '_REQUEST_FAILED') }
+            trending: { ok: false, state: 'error', code: failure.code }
           }
         }
       };
-      next.events = addEvent(prior.events, rateLimited ? 'RATE_LIMITED' : 'ERROR', next.error, chain);
+      next.events = addEvent(prior.events, failure.type, failure.message, chain, { code: failure.code, stage: failure.stage });
       next.chainStates = { ...(prior.chainStates || {}), [chain]: scopeSnapshot(next) };
       this.state.save(next);
     } finally {
@@ -935,21 +1030,19 @@ export class Scanner {
           return;
         }
         if (!this.running) {
-          const enabled = this.controls?.value.enabledChains || [this.activeChain];
           // During provider recovery, an unverified chain can repeatedly 429
           // and starve a documented chain behind the global safety pause.
           // Recover through a documented chain first; normal multi-chain
           // least-recently-attempted rotation resumes after recovery.
-          const documented = chain => marketState?.chains?.[chain]?.documented === true;
           // Keep the complete recovery window on a documented chain. One
           // successful BSC probe must not immediately rotate the same global
           // key to an unverified chain and restart a 15-minute 429 cooldown.
-          const recoveryPool = marketState?.recovery?.active && enabled.some(documented)
-            ? enabled.filter(documented) : enabled;
+          const recoveryPool = this.schedulingPool(marketState);
           const next = [...recoveryPool].sort((a, b) => {
             const scope = c => c === this.activeChain ? this.state.value : this.state.value.chainStates?.[c];
             return num(scope(a)?.lastAttemptAt) - num(scope(b)?.lastAttemptAt);
           })[0];
+          if (!next) return;
           if (next !== this.activeChain) this.activateChain(next, true);
           await this.cycle();
         }
@@ -971,12 +1064,13 @@ export class Scanner {
             : Math.max(interval, providerReadyAt(this.provider) - Date.now());
           // Long Retry-After dates must not overflow Node's timer and turn
           // into millisecond retries. These wake-ups never bypass the guard.
-          this.timer = setTimeout(() => { void tick(); }, Math.min(wait, 3600000));
+          this.nextTickAt = Date.now() + Math.min(wait, 3600000);
+          this.timer = setTimeout(() => { this.nextTickAt = 0; void tick(); }, Math.min(wait, 3600000));
         }
       }
     };
     await tick();
   }
 
-  stop() { this.stopped = true; this.cycleController?.abort(); if (this.timer) clearTimeout(this.timer); }
+  stop() { this.stopped = true; this.nextTickAt = 0; this.cycleController?.abort(); if (this.timer) clearTimeout(this.timer); }
 }

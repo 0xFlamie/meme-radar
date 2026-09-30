@@ -186,7 +186,7 @@
     .dot.SWITCHING { background: var(--cyan); }
     .dot.DEGRADED { background: var(--amber); }
     .dot.ERROR, .dot.STATE_ERROR, .dot.OFFLINE { background: var(--red); }
-    .dot.RATE_LIMITED, .dot.GMGN_AUTH_REQUIRED { background: var(--amber); }
+    .dot.RATE_LIMITED, .dot.AUTH_REQUIRED, .dot.AVE_AUTH_REQUIRED { background: var(--amber); }
     .dot.scanning { animation: statusPulse 1.1s ease-in-out infinite; }
     @keyframes statusPulse {
       0%, 100% { transform: scale(1); box-shadow: 0 0 8px currentColor; }
@@ -233,6 +233,7 @@
     }
     .chain-button:hover:not(:disabled) { border-color: var(--cyan); color: var(--cyan); transform: translateY(-1px); }
     .chain-button.scanning:not(.active) { border-color: #31584f; color: #d7e6e1; }
+    .chain-mode { margin-inline-start: 6px; font-size: 14px; color: var(--muted); }
     .chain-button.active { border-color: var(--green); background: #153328; color: var(--green); box-shadow: 0 0 16px #43efaa22; }
     .chain-button:disabled { opacity: .38; cursor: not-allowed; }
     .chain-button.switching { color: var(--amber); border-color: var(--amber); }
@@ -305,7 +306,6 @@
     }
     .onboarding-status { min-height: 24px; color: var(--muted); }
     .onboarding-status.bad { color: var(--red); }
-    .gmgn-create-link[aria-disabled="true"] { opacity: .45; pointer-events: none; }
 
     .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 13px; }
     .ave-settings { margin: 16px 0; padding: 18px; }
@@ -365,27 +365,6 @@
       font-size: 14px;
       vertical-align: 2px;
     }
-    .outcome-grid {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
-    }
-    .outcome-item {
-      min-height: 82px;
-      padding: 13px 16px;
-      border-right: 1px solid var(--line-soft);
-    }
-    .outcome-item:last-child { border-right: 0; }
-    .outcome-item label { display: block; color: var(--muted); font-size: 14px; }
-    .outcome-item strong { display: block; margin-top: 5px; font: 800 18px ui-monospace, monospace; }
-    .outcome-item small { display: block; margin-top: 3px; color: var(--muted); font-size: 14px; }
-    .sample-gate {
-      padding: 10px 16px;
-      border-top: 1px solid var(--line-soft);
-      color: var(--amber);
-      background: #2b220d55;
-      font-size: 14px;
-    }
-
     .head {
       padding: 14px 16px;
       border-bottom: 1px solid var(--line);
@@ -521,7 +500,6 @@
     .mini-button.active { background: #17342a; box-shadow: inset 0 0 0 1px currentColor; }
     .mini-button:disabled { cursor: not-allowed; opacity: .42; }
 
-    .events { padding: 8px 16px 14px; max-height: 390px; overflow: auto; }
     .event { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
     .event time { color: var(--muted); font-family: ui-monospace, monospace; white-space: nowrap; }
     .footer {
@@ -559,7 +537,6 @@
       .telemetry-item:nth-child(-n+3) { border-bottom: 1px solid var(--line-soft); }
       .metric { grid-column: span 4; }
       .half { grid-column: span 12; }
-      .outcome-grid { grid-template-columns: repeat(3, 1fr); }
     }
     @media (max-width: 760px) {
       .shell { width: calc(100% - 20px); padding-top: 14px; }
@@ -573,7 +550,6 @@
       .telemetry-item:nth-child(odd) { border-right: 1px solid var(--line-soft); }
       .telemetry-item:nth-child(even) { border-right: 0; }
       .metric { grid-column: span 6; }
-      .outcome-grid { grid-template-columns: 1fr 1fr; }
       .toolbar { grid-template-columns: 1fr; }
       .criteria { grid-template-columns: 1fr; }
       .footer { flex-direction: column; }
@@ -606,7 +582,7 @@
       text-align: left;
       unicode-bidi: isolate;
     }
-    html[dir="rtl"] .metric strong, html[dir="rtl"] .outcome-item strong, html[dir="rtl"] time {
+    html[dir="rtl"] .metric strong, html[dir="rtl"] time {
       direction: ltr;
       unicode-bidi: isolate;
     }
@@ -822,32 +798,24 @@
       </article>
       <article class="panel telemetry" aria-label="运行状态" data-i18n-aria="runtimeAria">
         <div class="telemetry-item"><label data-i18n="localService">本地服务</label><strong id="serviceState" data-i18n="connecting">正在连接</strong><small id="serviceDetail" data-i18n="port3791">端口3791</small></div>
-        <div class="telemetry-item"><label data-i18n="gmgnSource">AVE数据源</label><strong id="providerState" data-i18n="waitingState">等待状态</strong><small id="providerDetail" data-i18n="notRead">尚未读取</small></div>
+        <div class="telemetry-item"><label data-i18n="aveSource">AVE数据源</label><strong id="providerState" data-i18n="waitingState">等待状态</strong><small id="providerDetail" data-i18n="notRead">尚未读取</small></div>
         <div class="telemetry-item"><label data-i18n="lastAttemptLabel">最近扫描尝试</label><strong id="lastAttempt">--</strong><small id="attemptAgo" data-i18n="noRecord">暂无记录</small></div>
         <div class="telemetry-item"><label data-i18n="lastSuccessLabel">最近成功扫描</label><strong id="lastSuccess">--</strong><small id="successAgo" data-i18n="noRecord">暂无记录</small></div>
         <div class="telemetry-item"><label data-i18n="nextScanLabel">下轮扫描</label><strong id="nextScan">--</strong><small id="scanProgress" data-i18n="waitingSchedule">等待调度</small></div>
         <div class="telemetry-item"><label data-i18n="freshnessLabel">数据新鲜度</label><strong id="freshnessState" data-i18n="waitingData">等待数据</strong><small id="freshnessDetail" data-i18n="notJudged">尚未判断</small></div>
       </article>
 
+      <details id="screeningDetails" class="panel wide manage-body" hidden>
+        <summary data-i18n="screeningSummary">本轮筛选情况</summary>
+        <p id="screeningCounts"></p><small id="screeningChecked" class="muted"></small>
+      </details>
+
       <article class="panel metric"><label><span data-i18n="scanRounds">扫描轮次</span> <span class="scope" data-i18n="cumulative">累计</span></label><strong id="scanCount">0</strong><small data-i18n="completedRounds">成功完成的历史轮次</small></article>
-      <article class="panel metric"><label><span data-i18n="discoveredTokens">发现代币</span> <span class="scope" data-i18n="currentRound">本轮</span></label><strong id="discovered">0</strong><small data-i18n="gmgnReturned">本轮AVE返回数量</small></article>
+      <article class="panel metric"><label><span data-i18n="discoveredTokens">发现代币</span> <span class="scope" data-i18n="currentRound">本轮</span></label><strong id="discovered">0</strong><small data-i18n="aveReturned">本轮AVE返回数量</small></article>
       <article class="panel metric" hidden aria-hidden="true"><label><span data-i18n="prequalifiedLabel">初筛通过</span> <span class="scope" data-i18n="currentRound">本轮</span></label><strong id="prequalified">0</strong><small id="prequalifiedDetail" data-i18n="awaitingAudit">等待或已进入深度审计</small></article>
       <article class="panel metric" hidden aria-hidden="true"><label><span data-i18n="deepAuditLabel">深度审计</span> <span class="scope" data-i18n="last30m">近30分钟</span></label><strong id="audited">0</strong><small id="auditedDetail" data-i18n="auditSnapshots">当前保留的审计快照</small></article>
       <article class="panel metric" hidden aria-hidden="true"><label><span data-i18n="chainCandidatesLabel">链上候选/待人工看X</span> <span class="scope" data-i18n="last30m">近30分钟</span></label><strong id="chainCandidates">0</strong><small id="chainCandidateDetail" data-i18n="notBuySignal">链上硬门通过，不代表应买入</small></article>
       <article hidden><strong id="manualPassed">0</strong><small id="manualDetail"></small></article>
-
-      <article class="panel wide">
-        <div class="head"><h2 data-i18n="outcomeTitle">筛选后表现验证</h2><span data-i18n="shadowDisclaimer">影子观察，不代表可成交收益，也不作为交易指令</span></div>
-        <div class="outcome-grid">
-          <div class="outcome-item"><label data-i18n="trackedSamples">跟踪样本</label><strong id="outcomeTracked">0</strong><small data-i18n="historicalObservations">历史候选观察数</small></div>
-          <div class="outcome-item"><label data-i18n="result30m">30分钟结果</label><strong id="outcome30m" data-i18n="none">暂无</strong><small id="outcome30mCount" data-i18n="completedZero">完成0个样本</small></div>
-          <div class="outcome-item"><label data-i18n="result1h">1小时结果</label><strong id="outcome1h" data-i18n="none">暂无</strong><small id="outcome1hCount" data-i18n="completedZero">完成0个样本</small></div>
-          <div class="outcome-item"><label data-i18n="result2h">2小时结果</label><strong id="outcome2h" data-i18n="none">暂无</strong><small id="outcome2hCount" data-i18n="completedZero">完成0个样本</small></div>
-          <div class="outcome-item"><label data-i18n="result24h">24小时结果</label><strong id="outcome24h" data-i18n="none">暂无</strong><small id="outcome24hCount" data-i18n="completedZero">完成0个样本</small></div>
-        </div>
-        <div id="outcomeGate" class="sample-gate" data-i18n="sampleGate">调参门槛：30分钟、2小时或24小时的完成样本均需满50个；未满50个只做观察，不用于调参。</div>
-        <div id="outcomeCoverage" class="manage-body muted"></div>
-      </article>
 
       <article class="panel wide" hidden aria-hidden="true">
         <div class="head">
@@ -877,10 +845,6 @@
         <div id="candidates" aria-live="polite"><div class="empty" data-i18n="loadingAuditRecords">正在读取审计记录……</div></div>
       </article>
 
-      <article class="panel wide">
-        <div class="head"><h2 data-i18n="eventsTitle">雷达事件</h2><span id="cycle" data-i18n="notScanned">尚未扫描</span></div>
-        <div id="events" class="events"><div class="empty" data-i18n="noEvents">暂无事件</div></div>
-      </article>
     </section>
 
     </details>
@@ -936,6 +900,7 @@
       aveReason_gateway: ['网关限制提示','閘道限制提示','Gateway restriction indication','ゲートウェイ制限の通知','게이트웨이 제한 안내','إشارة تقييد البوابة'],
       aveReason_unknown: ['原因未明确','原因未明確','Reason unspecified','原因不明','원인 미확인','السبب غير محدد'],
       aveReason_timeout: ['响应超时','回應逾時','Response timeout','応答タイムアウト','응답 시간 초과','انتهت مهلة الرد'],
+      aveReason_schema: ['行情格式或身份核验失败','行情格式或身分核驗失敗','Market format or identity validation failed','市場データの形式・識別検証に失敗','시장 데이터 형식 또는 식별 검증 실패','فشل التحقق من تنسيق بيانات السوق أو هويتها'],
       aveReason_cancelled: ['已取消','已取消','Cancelled','キャンセル済み','취소됨','أُلغي'],
       poolAge: ["池龄 / 开始交易","池齡 / 開始交易","Pool / trading age","プール / 取引開始","풀 / 거래 기간","عمر المجمع / التداول"],
       launchAge: ["上线 / 开始交易","上線 / 開始交易","Launch / trading age","上場 / 取引開始","출시 / 거래 기간","عمر الإطلاق / التداول"],
@@ -969,8 +934,9 @@
       liveNewSort: ['最近出现','最近出現','Most recent','新しい順','최근 발견','الأحدث ظهورًا'],
       livePending: ['待补行情','待補行情','Awaiting market data','相場データ待ち','시세 데이터 대기','بانتظار بيانات السوق'],
       liveFetching: ['补充中','補充中','Loading','取得中','불러오는 중','جارٍ الاستكمال'],
-      liveEligible: ['可核验','可核驗','Ready for review','検証可能','검토 가능','جاهز للتحقق'],
+      liveEligible: ['初筛 · 未核验','初篩 · 未核驗','Screened · Unverified','一次選別・未検証','1차 선별 · 미검증','فحص أولي · غير متحقق'],
       liveRetained: ['最近线索 · 仅展示','最近線索 · 僅顯示','Recent lead · display only','最近の候補・表示のみ','최근 단서 · 표시 전용','إشارة حديثة · للعرض فقط'],
+      liveCardClocks: ['入选 {first} · 行情 {quote}', '入選 {first} · 行情 {quote}', 'Qualified {first} · Quote {quote}', '初回通過 {first} · 相場 {quote}', '첫 통과 {first} · 시세 {quote}', 'التأهل {first} · السعر {quote}'],
       liveCoverage: ['收到 {received} · 范围内 {scope} · 待补 {pending} · 待更新 {stale} · 可核验 {ready} · 已过滤 {excluded}',
         '收到 {received} · 範圍內 {scope} · 待補 {pending} · 待更新 {stale} · 可核驗 {ready} · 已過濾 {excluded}',
         'Received {received} · In scope {scope} · Pending {pending} · Stale {stale} · Reviewable {ready} · Filtered {excluded}',
@@ -984,6 +950,7 @@
       liveNew: ['新进榜','新進榜','New arrival','新規掲載','새 진입','جديد بالقائمة'],
       liveReady: ['发现流已更新','發現流已更新','Feed updated','更新済み','목록 업데이트됨','تم تحديث القائمة'],
       livePaused: ['已暂停自动更新','已暫停自動更新','Auto-update paused','自動更新停止中','자동 업데이트 중지','التحديث متوقف'],
+      liveRefreshFailed: ['候选更新失败，自动重试','候選更新失敗，自動重試','Feed update failed; retrying','候補の更新失敗・再試行中','후보 업데이트 실패; 재시도 중','تعذر تحديث القائمة؛ إعادة المحاولة تلقائياً'],
       livePolling: ['正在获取短周期榜单','正在取得短週期榜單','Fetching short-window ranking','短周期ランキング取得中','단기 순위 가져오는 중','جارٍ جلب ترتيب قصير المدى'],
       liveStale: ['数据已旧，请等待更新','資料已舊，請等待更新','Stale data; wait for update','古いデータ・更新待ち','오래된 데이터; 업데이트 대기','بيانات قديمة؛ انتظر التحديث'],
       liveMeta: ["{chain} · 采样 {time} · 显示 {shown}/{total}","{chain} · 採樣 {time} · 顯示 {shown}/{total}","{chain} · Sample {time} · {shown}/{total} shown","{chain} · 取得 {time} · {shown}/{total}表示","{chain} · 수집 {time} · {shown}/{total} 표시","{chain} · العينة {time} · عرض {shown}/{total}"],
@@ -1040,35 +1007,52 @@
       chainAria: ['扫描链路切换', '掃描鏈路切換', 'Scan chain switcher', 'スキャンチェーン切替', '스캔 체인 전환', 'مبدّل شبكة المسح'],
       chainTitle: ['扫描链路', '掃描鏈路', 'Scan chain', 'スキャン対象', '스캔 체인', 'شبكة المسح'],
       chainLoading: ['正在读取后端支持的链', '正在讀取後端支援的鏈', 'Reading supported chains', '対応チェーンを読み込み中', '지원 체인 확인 중', 'جارٍ قراءة الشبكات المدعومة'],
-      gmgnApiLabel: ['AVE API', 'AVE API', 'AVE API', 'AVE API', 'AVE API', 'واجهة AVE'],
-      gmgnApiPlaceholder: ['输入 API Key', '輸入 API Key', 'Enter API key', 'APIキーを入力', 'API 키 입력', 'أدخل مفتاح API'],
-      gmgnApiSubmitAria: ['确认并连接 AVE API', '確認並連接 AVE API', 'Confirm and connect AVE API', 'AVE APIを確認して接続', 'AVE API 확인 및 연결', 'تأكيد وربط واجهة AVE'],
-      gmgnApiSubmitText: ['确认', '確認', 'Confirm', '確認', '확인', 'تأكيد'],
-      gmgnApiLocalOnly: ['仅发往本机', '僅傳送至本機', 'Sent locally only', 'ローカル送信のみ', '로컬로만 전송', 'يُرسل محليًا فقط'],
-      gmgnApiRequired: ['请输入 API Key', '請輸入 API Key', 'Enter an API key', 'APIキーを入力してください', 'API 키를 입력하세요', 'أدخل مفتاح API'],
-      gmgnApiConnecting: ['正在连接……', '正在連接……', 'Connecting…', '接続中…', '연결 중…', 'جارٍ الاتصال…'],
-      gmgnApiConnected: ['已连接，正在安排扫描', '已連接，正在安排掃描', 'Verified; scan requested', '確認済み。スキャンを開始します', '검증 완료, 스캔 시작 요청됨', 'تم التحقق؛ تم طلب المسح'],
-      gmgnApiGetKey: ['首次使用 / 创建 API', '首次使用 / 建立 API', 'First use / Create API', '初回設定 / API作成', '첫 사용 / API 생성', 'الاستخدام الأول / إنشاء API'],
+      aveApiLabel: ['AVE API', 'AVE API', 'AVE API', 'AVE API', 'AVE API', 'واجهة AVE'],
+      aveApiPlaceholder: ['输入 API Key', '輸入 API Key', 'Enter API key', 'APIキーを入力', 'API 키 입력', 'أدخل مفتاح API'],
+      aveApiSubmitAria: ['确认并连接 AVE API', '確認並連接 AVE API', 'Confirm and connect AVE API', 'AVE APIを確認して接続', 'AVE API 확인 및 연결', 'تأكيد وربط واجهة AVE'],
+      aveApiSubmitText: ['确认', '確認', 'Confirm', '確認', '확인', 'تأكيد'],
+      aveApiLocalOnly: ['仅发往本机', '僅傳送至本機', 'Sent locally only', 'ローカル送信のみ', '로컬로만 전송', 'يُرسل محليًا فقط'],
+      aveApiRequired: ['请输入 API Key', '請輸入 API Key', 'Enter an API key', 'APIキーを入力してください', 'API 키를 입력하세요', 'أدخل مفتاح API'],
+      aveApiConnecting: ['正在连接……', '正在連接……', 'Connecting…', '接続中…', '연결 중…', 'جارٍ الاتصال…'],
+      aveApiConnected: ['已连接，正在安排扫描', '已連接，正在安排掃描', 'Verified; scan requested', '確認済み。スキャンを開始します', '검증 완료, 스캔 시작 요청됨', 'تم التحقق؛ تم طلب المسح'],
+      aveApiGetKey: ['首次使用 / 创建 API', '首次使用 / 建立 API', 'First use / Create API', '初回設定 / API作成', '첫 사용 / API 생성', 'الاستخدام الأول / إنشاء API'],
       closeAction: ['关闭', '關閉', 'Close', '閉じる', '닫기', 'إغلاق'],
-      gmgnApiConfigured: ['已配置，可更换 Key', '已設定，可更換 Key', 'Configured; you can replace the key', '設定済み。キーを変更できます', '설정됨; 키 변경 가능', 'تم الإعداد؛ يمكنك تغيير المفتاح'],
-      gmgnApiVerified: ['已连接', '已連接', 'Connected', '接続済み', '연결됨', 'متصل'],
-      gmgnApiInvalid: ['Key 无效或已失效，请检查后重试', 'Key 無效或已失效，請檢查後重試', 'Invalid or expired key; check and retry', 'キーが無効または期限切れです', '키가 잘못되었거나 만료되었습니다', 'المفتاح غير صالح أو منتهي الصلاحية'],
-      gmgnApiPermission: ['该 Key 没有此链数据的读取权限', '此 Key 沒有此鏈資料的讀取權限', 'This key cannot read data for this chain', 'このキーには対象チェーンの読取権限がありません', '이 키에는 해당 체인의 읽기 권한이 없습니다', 'لا يملك المفتاح إذن قراءة بيانات هذه الشبكة'],
-      gmgnApiRate: ['AVE 暂时限流，请稍后重试', 'AVE 暫時限流，請稍後重試', 'AVE rate limit reached; retry later', 'AVEの制限中です。しばらくして再試行してください', 'AVE 요청 제한, 나중에 다시 시도하세요', 'تم بلوغ حد طلبات AVE؛ أعد المحاولة لاحقًا'],
-      gmgnApiRateCountdown: ['AVE 已限流，请勿重复点击；约 {seconds} 秒后再试', 'AVE 已限流，請勿重複點擊；約 {seconds} 秒後再試', 'AVE is rate-limited. Do not retry repeatedly; try again in about {seconds}s.', 'AVEの制限中です。連続操作せず、約{seconds}秒後に再試行してください。', 'AVE 요청 제한 중입니다. 반복 클릭하지 말고 약 {seconds}초 후 다시 시도하세요.', 'تم تقييد AVE. لا تكرر المحاولة؛ حاول مجددًا بعد نحو {seconds} ثانية.'],
-      gmgnApiNetwork: ['无法连接 AVE；Windows 请开启系统代理/VPN，完全退出雷达后重新打开', '無法連接 AVE；Windows 請開啟系統代理/VPN，完全退出雷達後重新開啟', 'Cannot reach AVE. On Windows, enable the system proxy/VPN, fully exit Radar, then reopen it.', 'AVEに接続できません。Windowsではシステムプロキシ/VPNを有効にし、Radarを終了して再起動してください。', 'AVE에 연결할 수 없습니다. Windows 시스템 프록시/VPN을 켠 뒤 레이더를 완전히 종료하고 다시 여세요.', 'تعذر الاتصال بـ AVE. في Windows فعّل وكيل النظام أو VPN، ثم أغلق الرادار بالكامل وأعد فتحه.'],
-      gmgnApiInstall: ['请先运行“安装并启动”入口', '請先執行「安裝並啟動」入口', 'Run the installer and launcher first', '先にインストーラーを実行してください', '설치 및 실행 파일을 먼저 실행하세요', 'شغّل المثبّت أولًا'],
-      gmgnApiFailed: ['连接失败，请检查密钥后重试', '連接失敗，請檢查密鑰後重試', 'Connection failed; check the key and retry', '接続失敗。キーを確認して再試行してください', '연결 실패; 키를 확인하고 다시 시도하세요', 'فشل الاتصال؛ تحقق من المفتاح وحاول مجددًا'],
+      aveApiConfigured: ['已配置，可更换 Key', '已設定，可更換 Key', 'Configured; you can replace the key', '設定済み。キーを変更できます', '설정됨; 키 변경 가능', 'تم الإعداد؛ يمكنك تغيير المفتاح'],
+      aveApiVerified: ['已连接', '已連接', 'Connected', '接続済み', '연결됨', 'متصل'],
+      aveApiInvalid: ['Key 无效或已失效，请检查后重试', 'Key 無效或已失效，請檢查後重試', 'Invalid or expired key; check and retry', 'キーが無効または期限切れです', '키가 잘못되었거나 만료되었습니다', 'المفتاح غير صالح أو منتهي الصلاحية'],
+      aveApiPermission: ['该 Key 没有此链数据的读取权限', '此 Key 沒有此鏈資料的讀取權限', 'This key cannot read data for this chain', 'このキーには対象チェーンの読取権限がありません', '이 키에는 해당 체인의 읽기 권한이 없습니다', 'لا يملك المفتاح إذن قراءة بيانات هذه الشبكة'],
+      aveApiRate: ['AVE 暂时限流，请稍后重试', 'AVE 暫時限流，請稍後重試', 'AVE rate limit reached; retry later', 'AVEの制限中です。しばらくして再試行してください', 'AVE 요청 제한, 나중에 다시 시도하세요', 'تم بلوغ حد طلبات AVE؛ أعد المحاولة لاحقًا'],
+      aveApiRateCountdown: ['AVE 已限流，请勿重复点击；约 {seconds} 秒后再试', 'AVE 已限流，請勿重複點擊；約 {seconds} 秒後再試', 'AVE is rate-limited. Do not retry repeatedly; try again in about {seconds}s.', 'AVEの制限中です。連続操作せず、約{seconds}秒後に再試行してください。', 'AVE 요청 제한 중입니다. 반복 클릭하지 말고 약 {seconds}초 후 다시 시도하세요.', 'تم تقييد AVE. لا تكرر المحاولة؛ حاول مجددًا بعد نحو {seconds} ثانية.'],
+      aveApiNetwork: ['无法连接 AVE；Windows 请开启系统代理/VPN，完全退出雷达后重新打开', '無法連接 AVE；Windows 請開啟系統代理/VPN，完全退出雷達後重新開啟', 'Cannot reach AVE. On Windows, enable the system proxy/VPN, fully exit Radar, then reopen it.', 'AVEに接続できません。Windowsではシステムプロキシ/VPNを有効にし、Radarを終了して再起動してください。', 'AVE에 연결할 수 없습니다. Windows 시스템 프록시/VPN을 켠 뒤 레이더를 완전히 종료하고 다시 여세요.', 'تعذر الاتصال بـ AVE. في Windows فعّل وكيل النظام أو VPN، ثم أغلق الرادار بالكامل وأعد فتحه.'],
+      aveApiInstall: ['请先运行“安装并启动”入口', '請先執行「安裝並啟動」入口', 'Run the installer and launcher first', '先にインストーラーを実行してください', '설치 및 실행 파일을 먼저 실행하세요', 'شغّل المثبّت أولًا'],
+      aveApiFailed: ['连接失败，请检查密钥后重试', '連接失敗，請檢查密鑰後重試', 'Connection failed; check the key and retry', '接続失敗。キーを確認して再試行してください', '연결 실패; 키를 확인하고 다시 시도하세요', 'فشل الاتصال؛ تحقق من المفتاح وحاول مجددًا'],
       runtimeAria: ['运行状态', '運行狀態', 'Runtime status', '稼働状態', '운영 상태', 'حالة التشغيل'],
       localService: ['本地服务', '本地服務', 'Local service', 'ローカルサービス', '로컬 서비스', 'الخدمة المحلية'],
       connecting: ['正在连接', '正在連線', 'Connecting', '接続中', '연결 중', 'جارٍ الاتصال'],
       port3791: ['端口3791', '連接埠3791', 'Port 3791', 'ポート3791', '포트 3791', 'المنفذ 3791'],
-      gmgnSource: ['AVE数据源', 'AVE資料源', 'AVE source', 'AVEデータソース', 'AVE 데이터 소스', 'مصدر بيانات AVE'],
+      aveSource: ['AVE数据源', 'AVE資料源', 'AVE source', 'AVEデータソース', 'AVE 데이터 소스', 'مصدر بيانات AVE'],
       notRead: ['尚未读取', '尚未讀取', 'Not read yet', '未取得', '아직 읽지 않음', 'لم تُقرأ بعد'],
       lastAttemptLabel: ['最近扫描尝试', '最近掃描嘗試', 'Last scan attempt', '最終スキャン試行', '최근 스캔 시도', 'آخر محاولة مسح'],
       noRecord: ['暂无记录', '暫無記錄', 'No record', '記録なし', '기록 없음', 'لا يوجد سجل'],
       lastSuccessLabel: ['最近成功扫描', '最近成功掃描', 'Last successful scan', '最終成功スキャン', '최근 성공 스캔', 'آخر مسح ناجح'],
-      nextScanLabel: ['下轮扫描', '下輪掃描', 'Next scan', '次回スキャン', '다음 스캔', 'المسح التالي'],
+      nextScanLabel: ['当前链下次尝试', '目前鏈下次嘗試', 'Next attempt · this chain', '対象チェーンの次回試行', '현재 체인 다음 시도', 'المحاولة التالية لهذه الشبكة'],
+      sharedCadence: ['{n}条链共享 · 当前链约{time}一轮','{n}條鏈共用 · 目前鏈約{time}一輪','{n} shared chains · about {time} per chain','{n}チェーンで共有・各チェーン約{time}間隔','{n}개 체인 공유 · 체인당 약 {time}','{n} شبكات مشتركة · نحو {time} لكل شبكة'],
+      earliestAttempt: ['最早约{time}后','最早約{time}後','No earlier than ~{time}','最短で約{time}後','최소 약 {time} 후','ليس قبل نحو {time}'],
+      attemptEstimate: ['仅为尝试时间，限流时顺延','僅為嘗試時間，限流時順延','Attempt estimate; limits may delay it','試行の目安です。制限時は延期','시도 예상이며 제한 시 지연됨','وقت محاولة تقديري؛ قد تؤخره القيود'],
+      chainDeferred: ['恢复后轮到此链','恢復後輪到此鏈','Queued after recovery','復旧後に順番待ち','복구 후 해당 체인 대기','بانتظار دورها بعد التعافي'],
+      scanDisabled: ['此链未启用','此鏈未啟用','Chain not enabled','チェーンが無効','체인이 비활성화됨','الشبكة غير مفعلة'],
+      scanNeedsAction: ['请检查 API / 预算','請檢查 API / 預算','Check API / budget','API・予算を確認','API / 예산 확인','تحقق من API / الميزانية'],
+      screeningSummary: ['本轮筛选情况','本輪篩選情況','Latest screening breakdown','直近の選別結果','최근 선별 내역','تفاصيل الفحص الأخير'],
+      screeningCounts: ['收到 {received} · 行情初筛 {qualified} · 未通过 {filtered}','收到 {received} · 行情初篩 {qualified} · 未通過 {filtered}','Received {received} · Market screened {qualified} · Filtered {filtered}','取得 {received}・行情一次通過 {qualified}・除外 {filtered}','수신 {received} · 시세 통과 {qualified} · 제외 {filtered}','المستلم {received} · فحص السوق {qualified} · المستبعد {filtered}'],
+      screeningClock: ['采样 {time} · 行情筛选，非安全审计；原因可重叠','採樣 {time} · 行情篩選，非安全審計；原因可重疊','Sampled {time} · Market screening, not a safety audit; reasons can overlap','取得 {time}・市場選別であり安全監査ではありません。理由は重複あり','수집 {time} · 안전 감사 아닌 시세 선별; 사유 중복 가능','عينة {time} · فحص سوق لا تدقيق أمان؛ قد تتداخل الأسباب'],
+      filterStale: ['行情过期','行情過期','Stale quotes','古い行情','오래된 시세','أسعار قديمة'],
+      filterMissing: ['资料不足','資料不足','Missing data','資料不足','자료 부족','بيانات ناقصة'],
+      filterCap: ['市值范围','市值範圍','Market cap','時価総額範囲','시가총액 범위','نطاق القيمة السوقية'],
+      filterAge: ['币龄条件','幣齡條件','Age criteria','経過時間条件','코인 연령 조건','شروط العمر'],
+      filterLiquidity: ['流动性','流動性','Liquidity','流動性','유동성','السيولة'],
+      filterActivity: ['买卖活跃度','買賣活躍度','Trade activity','売買活動','거래 활동','نشاط التداول'],
+      filterRisk: ['已知风险','已知風險','Known risk','既知リスク','알려진 위험','مخاطر معروفة'],
+      filterOther: ['其他条件','其他條件','Other criteria','その他の条件','기타 조건','شروط أخرى'],
       waitingSchedule: ['等待调度', '等待排程', 'Waiting for schedule', '実行待ち', '스케줄 대기', 'بانتظار الجدولة'],
       freshnessLabel: ['数据新鲜度', '資料新鮮度', 'Data freshness', 'データ鮮度', '데이터 최신성', 'حداثة البيانات'],
       waitingData: ['等待数据', '等待資料', 'Waiting for data', 'データ待ち', '데이터 대기', 'بانتظار البيانات'],
@@ -1078,7 +1062,7 @@
       completedRounds: ['成功完成的历史轮次', '歷史成功完成輪次', 'Historically completed cycles', '過去の完了サイクル', '성공적으로 완료된 역사적 주기', 'الدورات المكتملة تاريخيًا'],
       discoveredTokens: ['发现代币', '發現代幣', 'Tokens found', '検出トークン', '발견 토큰', 'الرموز المكتشفة'],
       currentRound: ['本轮', '本輪', 'This cycle', '今回', '현재 주기', 'هذه الدورة'],
-      gmgnReturned: ['本轮AVE返回数量', '本輪AVE回傳數量', 'Returned by AVE this cycle', '今回のAVE取得数', '이번 주기 AVE 반환 수', 'ما أعاده AVE في هذه الدورة'],
+      aveReturned: ['本轮AVE返回数量', '本輪AVE回傳數量', 'Returned by AVE this cycle', '今回のAVE取得数', '이번 주기 AVE 반환 수', 'ما أعاده AVE في هذه الدورة'],
       prequalifiedLabel: ['初筛通过', '初篩通過', 'Pre-screened', '一次審査通過', '1차 필터 통과', 'اجتازت الفحص الأولي'],
       awaitingAudit: ['等待或已进入深度审计', '等待或已進入深度審計', 'Waiting for or in deep audit', '深度審査待ちまたは実行中', '심층 감사 대기 또는 진행 중', 'بانتظار التدقيق العميق أو قيده'],
       deepAuditLabel: ['深度审计', '深度審計', 'Deep audits', '深度審査', '심층 감사', 'تدقيق عميق'],
@@ -1123,6 +1107,11 @@
       eventsTitle: ['雷达事件', '雷達事件', 'Radar events', 'レーダーイベント', '레이더 이벤트', 'أحداث الرادار'],
       notScanned: ['尚未扫描', '尚未掃描', 'Not scanned yet', '未スキャン', '아직 스캔하지 않음', 'لم يتم المسح بعد'],
       noEvents: ['暂无事件', '暫無事件', 'No events', 'イベントなし', '이벤트 없음', 'لا أحداث'],
+      noRecentEvents: ['近24小时暂无新事件', '近24小時暫無新事件', 'No new events in the last 24h', '直近24時間の新しいイベントなし', '최근 24시간 새 이벤트 없음', 'لا أحداث جديدة خلال آخر 24 ساعة'],
+      recentRequests: ['本次运行近 {n} 次请求：{ok} 成功 · {failed} 异常', '本次執行近 {n} 次請求：{ok} 成功 · {failed} 異常', 'Last {n} requests this session: {ok} succeeded · {failed} failed', '今回の直近{n}件：成功{ok}・異常{failed}', '이번 실행 최근 {n}개 요청: 성공 {ok} · 실패 {failed}', 'آخر {n} طلبات في هذه الجلسة: {ok} ناجح · {failed} فاشل'],
+      requestsCancelled: [' · {n} 已取消', ' · {n} 已取消', ' · {n} cancelled', '・取消{n}', ' · 취소 {n}', ' · {n} ملغى'],
+      noRecentRequests: ['本次运行暂无近期请求记录', '本次執行暫無近期請求記錄', 'No recent request records in this session', '今回の実行に直近のリクエスト記録なし', '이번 실행의 최근 요청 기록 없음', 'لا سجلات طلبات حديثة في هذه الجلسة'],
+      requestSampleTime: ['最近请求：{time}', '最近請求：{time}', 'Latest request: {time}', '最終リクエスト：{time}', '최근 요청: {time}', 'آخر طلب: {time}'],
       footerLocal: ['独立端口3791 · 只扫描、不交易 · 人工标记仅保存在当前浏览器。', '獨立連接埠3791 · 只掃描、不交易 · 人工標記僅保存在目前瀏覽器。', 'Dedicated port 3791 · scan only, never trade · manual marks stay in this browser.', '専用ポート3791・スキャンのみ・取引なし・手動マークはこのブラウザ内だけ。', '전용 포트 3791 · 스캔 전용, 거래 없음 · 수동 표시는 현재 브라우저에만 저장.', 'المنفذ المستقل 3791 · مسح فقط بلا تداول · العلامات اليدوية في هذا المتصفح فقط.'],
       unknown: ['未知', '未知', 'Unknown', '不明', '알 수 없음', 'غير معروف'],
       unavailable: ['不可用', '不可用', 'Unavailable', '利用不可', '사용 불가', 'غير متاح'],
@@ -1157,6 +1146,9 @@
       chainEth: ['以太坊', '以太坊', 'Ethereum', 'イーサリアム', '이더리움', 'إيثريوم'],
       chainRobinhood: ['罗宾汉链', '羅賓漢鏈', 'Robinhood Chain', 'Robinhoodチェーン', '로빈후드 체인', 'شبكة Robinhood'],
       chainOfflineHint: ['本地服务离线，暂时不能切换链路', '本地服務離線，暫時不能切換鏈路', 'Local service is offline; chain switching is unavailable', 'ローカルサービスがオフラインのため切替できません', '로컬 서비스가 오프라인이라 체인을 바꿀 수 없습니다', 'الخدمة المحلية غير متصلة؛ لا يمكن تبديل الشبكة'],
+      chainPollingBadge: ['轮询', '輪詢', 'Polling', '巡回', '순환', 'تناوب'],
+      chainPollingTitle: ['已加入轮询；不代表行情实时在线', '已加入輪詢；不代表行情即時在線', 'Included in polling; not a live-data health indicator', '巡回対象です。リアルタイムデータの正常性を示すものではありません', '순환 대상이며 실시간 데이터 정상 여부를 뜻하지 않습니다', 'ضمن التناوب؛ لا يشير إلى سلامة البيانات الفورية'],
+      chainJoinTitle: ['尚未启用；点击加入轮询', '尚未啟用；點擊加入輪詢', 'Not enabled; click to join polling', '未有効。クリックして巡回に追加', '비활성; 클릭하여 순환에 추가', 'غير مفعلة؛ انقر للإضافة إلى التناوب'],
       chainPendingHint: ['当前：{current} · 本轮结束后切换到{pending}', '目前：{current} · 本輪結束後切換到{pending}', 'Current: {current} · switch to {pending} after this cycle', '現在：{current}・今回終了後に{pending}へ切替', '현재: {current} · 이번 주기 후 {pending}(으)로 전환', 'الحالية: {current} · التبديل إلى {pending} بعد هذه الدورة'],
       chainReadyHint: ['点击已启用链只查看；未启用链会加入，满3条时替换当前查看链', '點擊已啟用鏈只查看；未啟用鏈會加入，滿3條時取代當前查看鏈', 'Enabled chains change the view; inactive chains join polling and replace the viewed chain when all 3 slots are full', '有効なチェーンは表示切替のみ。未選択チェーンは追加され、3件済みなら表示中を置換', '활성 체인은 보기만 바꾸고, 비활성 체인은 추가되며 3개가 차면 현재 보는 체인을 교체', 'الشبكات المفعلة تغير العرض فقط؛ تنضم غير المفعلة للتناوب وتستبدل المعروضة عند امتلاء الثلاث'],
       chainClickHint: ['当前：{chain} · 点击其他链后等待轮询调度', '目前：{chain} · 點擊其他鏈後等待輪詢調度', 'Current: {chain} · changes wait for the polling scheduler', '現在：{chain}・変更後は巡回スケジュールを待ちます', '현재: {chain} · 변경 후 순환 스케줄을 기다립니다', 'الحالية: {chain} · تنتظر التغييرات جدول التناوب'],
@@ -1231,12 +1223,12 @@
       providerDiscovery: ['发现源{ok}/{total}', '發現源{ok}/{total}', 'Discovery {ok}/{total}', '発見元 {ok}/{total}', '발견 소스 {ok}/{total}', 'مصدر الاكتشاف {ok}/{total}'],
       providerAudit: ['深审接口{ok}/{total}', '深審介面{ok}/{total}', 'Audit APIs {ok}/{total}', '審査API {ok}/{total}', '심층 감사 API {ok}/{total}', 'واجهات التدقيق {ok}/{total}'],
       providerSecondary: ['外部复核{ok}/{total}', '外部複核{ok}/{total}', 'Secondary checks {ok}/{total}', '外部確認 {ok}/{total}', '외부 검토 {ok}/{total}', 'الفحوص الخارجية {ok}/{total}'],
-      gmgnOnly: ['当前链仅AVE覆盖', '目前鏈僅AVE覆蓋', 'Only AVE covers this chain', 'このチェーンはAVEのみ', '이 체인은 AVE만 지원', 'هذه الشبكة مغطاة من AVE فقط'],
+      aveOnly: ['当前链仅AVE覆盖', '目前鏈僅AVE覆蓋', 'Only AVE covers this chain', 'このチェーンはAVEのみ', '이 체인은 AVE만 지원', 'هذه الشبكة مغطاة من AVE فقط'],
       checkedAgo: ['检查于{time}', '檢查於{time}', 'Checked {time}', '{time}に確認', '{time} 확인', 'فُحص {time}'],
       providerPartial: ['部分可用', '部分可用', 'Partially available', '一部利用可', '일부 사용 가능', 'متاح جزئيًا'],
       providerNormal: ['正常', '正常', 'Normal', '正常', '정상', 'طبيعي'],
       incompleteRound: ['本轮数据可能不完整', '本輪資料可能不完整', 'This cycle may be incomplete', '今回のデータは不完全な可能性があります', '이번 주기 데이터가 불완전할 수 있습니다', 'قد تكون بيانات هذه الدورة غير مكتملة'],
-      gmgnNormal: ['AVE接口正常', 'AVE介面正常', 'AVE API is normal', 'AVE API正常', 'AVE API 정상', 'واجهة AVE طبيعية'],
+      aveNormal: ['AVE接口正常', 'AVE介面正常', 'AVE API is normal', 'AVE API正常', 'AVE API 정상', 'واجهة AVE طبيعية'],
       recentCheck: ['最近检查{time}', '最近檢查{time}', 'Last checked {time}', '最終確認 {time}', '최근 확인 {time}', 'آخر فحص {time}'],
       recentSuccess: ['最近成功 {time}', '最近成功 {time}', 'Last success {time}', '最終成功 {time}', '최근 성공 {time}', 'آخر نجاح {time}'],
       noCheck: ['暂无检查记录', '暫無檢查記錄', 'No check record', '確認記録なし', '확인 기록 없음', 'لا سجل فحص'],
@@ -1439,7 +1431,7 @@
       DEGRADED: 'statusDegraded',
       RATE_LIMITED: 'statusRateLimited',
       ERROR: 'statusError',
-      GMGN_AUTH_REQUIRED: 'statusAuth',
+      AUTH_REQUIRED: 'statusAuth',
       AVE_AUTH_REQUIRED: 'statusAuth',
       BUDGET_PAUSED: 'aveBudgetPaused',
       HOURLY_BUDGET_PAUSED: 'aveHourlyPaused',
@@ -1501,7 +1493,8 @@
     let liveEnabled = readStorage('memeRadarLiveEnabledV1', true) !== false;
     let liveData = null;
     let liveBusy = false;
-    let liveOffline = false;
+    // A failed candidate request is not evidence that the local service is down.
+    let liveRefreshErrorChain = '';
     let liveFingerprint = '';
     const liveQueued = new Map();
     let selectedChainsDirty = false;
@@ -1555,7 +1548,9 @@
         return '<label><input type="checkbox" value="' + chain.id + '" ' + (enabled.includes(chain.id) ? 'checked' : '') + '>'
           + escapeHtml(chainLabel(chain)) + '<span class="muted"> · ' + escapeHtml(t(covered ? 'coverageDual' : 'coverageSingle')) + '</span></label>';
       }).join('');
-      byId('schedulerDetail').textContent = t('schedulerSummary', { chains: enabled.join(' / '), current: scheduler.scanningChain || activeChain(data) });
+      byId('schedulerDetail').textContent = scheduler.scope === 'shared-provider' && scheduler.nominalChainIntervalMs
+        ? t('sharedCadence', { n: (scheduler.eligibleChains || enabled).length, time: formatDuration(scheduler.nominalChainIntervalMs) })
+        : t('schedulerSummary', { chains: enabled.join(' / '), current: scheduler.scanningChain || activeChain(data) });
       byId('notificationButton').textContent = t(alertsEnabled ? 'muteAlerts' : 'enableAlerts');
       byId('savedNotes').innerHTML = Object.values(data.annotations || {}).map(function (row) {
         return '<div class="saved-row"><strong>' + escapeHtml(row.chain.toUpperCase()) + ' · ' + escapeHtml(row.address) + '</strong><div>' + escapeHtml(row.note || '')
@@ -1764,9 +1759,12 @@
       }).map(voiceSpotlightKey));
       const rows = new Map((data && data.rows || []).filter(function (row) {
         const firstSeenAt = number(row.firstSeenAt || row.newAt || row.sourceUpdatedAt);
-        const retained = row.retainedSnapshot === true && row.displayEligible === true && row.evidenceStale === true;
+        const retained = row.retainedSnapshot === true && row.displayEligible === true && row.evidenceStale === true
+          && Number.isFinite(row.displayUntil) && row.displayUntil > now;
         const current = row.discoveryState === 'READY' && row.auditEligible === true && row.stale !== true
-          && firstSeenAt > 0 && firstSeenAt <= now;
+          && row.retainedSnapshot !== true && firstSeenAt > 0 && firstSeenAt <= now
+          && row.sourceUpdatedAt > 0 && row.sourceUpdatedAt <= now && now - row.sourceUpdatedAt <= 60000
+          && row.expiresAt > now;
         return !rejected.has(voiceSpotlightKey(row)) && !['HARD_REJECT', 'REJECTED'].includes(row.audit && row.audit.status)
           && (current || retained);
       }).map(function (row) {
@@ -1786,8 +1784,10 @@
       // the card pool immediately, even if the separate feed refresh is late.
       const voiceRows = voiceSpotlightSnapshot && voiceSpotlightSnapshot.chains && voiceSpotlightSnapshot.chains[chain];
       (Array.isArray(voiceRows) ? voiceRows : []).filter(function (row) {
+        const evidenceAt = row.sourceUpdatedAt || row.auditedAt;
         return row.source === 'live' && row.status === 'LIVE_READY' && row.qualified === true
           && row.auditedAt > 0 && row.auditedAt <= now && now - row.auditedAt <= 10 * 60000
+          && evidenceAt > 0 && evidenceAt <= now && now - evidenceAt <= 60000
           && row.staleAt > now && !rejected.has(voiceSpotlightKey(row));
       }).forEach(function (row) {
         const key = voiceSpotlightKey(row);
@@ -2082,8 +2082,11 @@
         const isActive = chain.id === current;
         const supported = available.has(chain.id);
         const isScanning = scanning.includes(chain.id);
+        const hint = !hasStatus ? t('chainOfflineHint') : !supported ? t('unsupportedChain')
+          : t(isScanning ? 'chainPollingTitle' : 'chainJoinTitle');
         return '<button type="button" class="chain-button ' + (isActive ? 'active ' : '') + (isScanning ? 'scanning ' : '') + ((chainSwitching && isActive) || pending === chain.id ? 'switching' : '')
-          + '" data-chain="' + chain.id + '" aria-pressed="' + (isActive ? 'true' : 'false') + '" ' + ((!supported || chainSwitching || Boolean(pending)) ? 'disabled' : '') + '>' + escapeHtml(chainLabel(chain)) + '</button>';
+          + '" data-chain="' + chain.id + '" title="' + escapeHtml(hint) + '" aria-label="' + escapeHtml(chainLabel(chain) + ' · ' + hint) + '" aria-pressed="' + (isActive ? 'true' : 'false') + '" ' + ((!supported || chainSwitching || Boolean(pending)) ? 'disabled' : '') + '>' + escapeHtml(chainLabel(chain))
+          + (supported ? '<span class="chain-mode" aria-hidden="true">' + escapeHtml(isScanning ? t('chainPollingBadge') : '+') + '</span>' : '') + '</button>';
       }).join('');
       const activeItem = chainCatalog.find(function (chain) { return chain.id === current; });
       const pendingItem = chainCatalog.find(function (chain) { return chain.id === pending; });
@@ -2137,13 +2140,13 @@
       if (data.scanProvider === 'AVE') {
         const cooldown = data.aveMarket?.nextAllowedAt || 0;
         if (data.aveMarket?.pauseCode === 'AVE_RATE_LIMITED' && cooldown > Date.now()) {
-          return { title: t('gmgnApiRate'), detail: t('aveRetryAt', { time: formatClock(cooldown) }), tone: 'warn' };
+          return { title: t('aveApiRate'), detail: t('aveRetryAt', { time: formatClock(cooldown) }), tone: 'warn' };
         }
         if (data.status === 'RATE_LIMITED' && cooldown <= Date.now()) return { title: t('aveRetryReady'), detail: 'AVE', tone: 'warn' };
         if (data.status === 'DEGRADED') return { title: t('avePartial'), detail: 'AVE', tone: 'warn' };
         const key = { AVE_AUTH_REQUIRED: 'statusAuth', BUDGET_PAUSED: 'aveBudgetPaused', QUOTA_PAUSED: 'aveQuotaPaused',
           HOURLY_BUDGET_PAUSED: 'aveHourlyPaused', TOTAL_BUDGET_PAUSED: 'aveTotalPaused',
-          RATE_LIMITED: 'gmgnApiRate', ERROR: 'gmgnApiNetwork' }[data.status];
+          RATE_LIMITED: 'aveApiRate', ERROR: 'aveApiNetwork' }[data.status];
         if (key) return { title: t(key), detail: 'AVE', tone: 'warn' };
         const observed = data.aveMarket?.chains?.[activeChain(data)]?.state === 'observed';
         return { title: t(observed ? 'providerNormal' : 'waitingState'), detail: t(observed ? 'avePollingHealthy' : 'aveAwaitingFirstScan'), tone: observed ? 'good' : 'warn' };
@@ -2164,32 +2167,19 @@
         if (discoveryEndpoints.length) pieces.push(t('providerDiscovery', { ok: discoveryOk, total: discoveryEndpoints.length }));
         if (auditEndpoints.length) pieces.push(t('providerAudit', { ok: auditOk, total: auditEndpoints.length }));
         if (secondaryCovered.length) pieces.push(t('providerSecondary', { ok: secondaryOk, total: secondaryCovered.length }));
-        else if (secondaryEndpoints.length) pieces.push(t('gmgnOnly'));
+        else if (secondaryEndpoints.length) pieces.push(t('aveOnly'));
         const checkedAt = Math.max(number(discovery && discovery.checkedAt), number(audit && audit.checkedAt), number(secondary && secondary.checkedAt));
         if (checkedAt) pieces.push(t('checkedAgo', { time: relativeTime(checkedAt) }));
         const incomplete = discovery && discovery.complete === false || audit && audit.complete === false
           || secondaryCovered.length && secondary && secondary.complete === false;
         if (incomplete) return { title: t('providerPartial'), detail: pieces.join(' · ') || t('incompleteRound'), tone: 'warn' };
-        return { title: t('providerNormal'), detail: pieces.join(' · ') || t('gmgnNormal'), tone: 'good' };
-      }
-      const source = health.gmgn;
-      if (source) {
-        const status = String(source.status || '').toUpperCase();
-        const sourceTime = source.lastSuccessAt || source.checkedAt;
-        const lastSuccessText = sourceTime ? t('recentCheck', { time: relativeTime(sourceTime) }) : t('noCheck');
-        if (source.complete === false) return { title: t('providerPartial'), detail: lastSuccessText + ' · ' + t('incompleteRound'), tone: 'warn' };
-        if (source.complete === true) return { title: t('providerNormal'), detail: lastSuccessText, tone: 'good' };
-        if (status.includes('PARTIAL')) return { title: t('providerPartial'), detail: lastSuccessText + ' · ' + t('incompleteRound'), tone: 'warn' };
-        if (status.includes('RATE')) return { title: t('statusRateLimited'), detail: source.retryAt ? t('retryAt', { time: formatClock(source.retryAt) }) : t('retryWaiting'), tone: 'warn' };
-        if (status.includes('AUTH')) return { title: t('notAuthorized'), detail: t('configReadOnly'), tone: 'warn' };
-        if (source.available === false || status.includes('ERROR') || status.includes('FAIL')) return { title: t('requestError'), detail: lastSuccessText, tone: 'bad' };
-        if (source.available === true) return { title: t('providerNormal'), detail: lastSuccessText, tone: 'good' };
+        return { title: t('providerNormal'), detail: pieces.join(' · ') || t('aveNormal'), tone: 'good' };
       }
       if (data.status === 'RUNNING') return { title: t('providerNormal'), detail: t('lastRoundSuccess'), tone: 'good' };
       if (data.status === 'DEGRADED') return { title: t('providerPartial'), detail: t('partialEvidence'), tone: 'warn' };
       if (data.status === 'SCANNING' || data.status === 'SWITCHING') return { title: t('reading'), detail: t('waitingRound'), tone: 'info' };
       if (data.status === 'RATE_LIMITED') return { title: t('statusRateLimited'), detail: data.retryAt ? t('retryAt', { time: formatClock(data.retryAt) }) : t('retryWaiting'), tone: 'warn' };
-      if (data.status === 'GMGN_AUTH_REQUIRED') return { title: t('notAuthorized'), detail: t('configReadOnly'), tone: 'warn' };
+      if (data.status === 'AUTH_REQUIRED') return { title: t('notAuthorized'), detail: t('configReadOnly'), tone: 'warn' };
       if (data.status === 'STARTING') return { title: t('initializing'), detail: t('waitingFirstScan'), tone: 'warn' };
       return { title: t('requestError'), detail: safeMessage(data.error, t('waitAutoRetry')), tone: 'bad' };
     }
@@ -2215,6 +2205,34 @@
       return value;
     }
 
+    function schedulePresentation(data, now) {
+      const scheduler = data.scheduler;
+      if (scheduler?.scope !== 'shared-provider') return null;
+      const reason = scheduler.reason;
+      if (reason === 'scanning') return { title: t('statusScanning'), detail: t('backendConfirmedScanning') };
+      if (reason === 'disabled') return { title: t('scanDisabled'), detail: t('waitingSchedule') };
+      if (reason === 'recovery_chain_deferred') return { title: t('chainDeferred'), detail: t('waitRateRelease') };
+      if (['auth_required', 'manual_reset_required'].includes(reason)) return { title: t('scanNeedsAction'), detail: t('waitingSchedule') };
+      if (reason === 'stopped') return { title: t('waitingSchedule'), detail: t('noLiveProgress') };
+      const next = Number(scheduler.selectedNextAttemptAt);
+      return { title: Number.isFinite(next) && next > now ? t('earliestAttempt', { time: formatDuration(next - now) }) : t('waitingSchedule'),
+        detail: t('attemptEstimate') };
+    }
+
+    function renderScreening(data) {
+      const screening = data.screening;
+      byId('screeningDetails').hidden = !screening?.countsAvailable;
+      if (!screening?.countsAvailable) return;
+      const reasonKeys = { stale: 'filterStale', missing_market: 'filterMissing', market_cap: 'filterCap', age: 'filterAge',
+        liquidity: 'filterLiquidity', activity: 'filterActivity', known_risk: 'filterRisk', other: 'filterOther' };
+      const reasons = Object.entries(reasonKeys).filter(function ([key]) { return number(screening.reasonCounts?.[key]) > 0; })
+        .map(function ([key, label]) { return t(label) + ' ' + formatCount(screening.reasonCounts[key]); });
+      byId('screeningCounts').textContent = t('screeningCounts', { received: formatCount(screening.received),
+        qualified: formatCount(screening.marketQualified), filtered: formatCount(screening.filtered) })
+        + (reasons.length ? ' · ' + reasons.join(' / ') : '');
+      byId('screeningChecked').textContent = t('screeningClock', { time: formatClock(screening.checkedAt) });
+    }
+
     function renderTelemetry() {
       const now = Date.now();
       if (!serviceOnline || !lastData) {
@@ -2225,6 +2243,7 @@
         byId('providerState').className = 'warn';
         byId('providerDetail').textContent = t('localOffline');
         byId('scanProgress').textContent = t('cannotJudge');
+        byId('nextScan').textContent = t('unavailable');
         byId('freshnessState').textContent = t('unavailable');
         byId('freshnessState').className = 'bad';
         byId('freshnessDetail').textContent = t('restoreService');
@@ -2237,9 +2256,11 @@
       const lastAttempt = number(data.lastAttemptAt) || number(data.generatedAt);
       const lastSuccess = storedLastSuccess(data);
       const freshness = freshnessStatus(Object.assign({}, data, { generatedAt: lastSuccess }), now, policy);
-      const scheduledAt = number(data.nextCycleAt) || (data.retryAt && Number(data.retryAt) > now ? Number(data.retryAt) : lastAttempt + policy.scanIntervalMs);
+      const scheduledAt = data.scheduler?.scope === 'shared-provider' ? number(data.scheduler.selectedNextAttemptAt)
+        : number(data.nextCycleAt) || (data.retryAt && Number(data.retryAt) > now ? Number(data.retryAt) : lastAttempt + policy.scanIntervalMs);
       const isExplicitlyScanning = data.scanInProgress === true || data.scanning === true;
       const mayBeScanning = !isExplicitlyScanning && scheduledAt > 0 && now >= scheduledAt && now - scheduledAt < Math.max(45000, number(data.lastCycleMs) * 2);
+      const schedule = schedulePresentation(data, now);
 
       byId('serviceState').textContent = t('online');
       byId('serviceState').className = 'good';
@@ -2255,7 +2276,10 @@
       byId('freshnessState').className = freshness.tone;
       byId('freshnessDetail').textContent = freshness.detail;
 
-      if (scheduledAt > now) {
+      if (schedule) {
+        byId('nextScan').textContent = schedule.title;
+        byId('scanProgress').textContent = schedule.detail;
+      } else if (scheduledAt > now) {
         byId('nextScan').textContent = t('afterDuration', { time: formatDuration(scheduledAt - now) });
         byId('scanProgress').textContent = data.status === 'RATE_LIMITED' ? t('waitRateRelease') : t('waitNextSchedule');
       } else {
@@ -2270,7 +2294,7 @@
     function renderNotice(data) {
       const notice = byId('notice');
       notice.hidden = ['RUNNING', 'SCANNING', 'DEGRADED'].includes(data.status);
-      if (data.status === 'GMGN_AUTH_REQUIRED') {
+      if (['AUTH_REQUIRED', 'AVE_AUTH_REQUIRED'].includes(data.status)) {
         notice.className = 'notice';
         notice.textContent = t('authNotice');
       } else if (data.status === 'RATE_LIMITED') {
@@ -2316,66 +2340,29 @@
         .replace(/：WAIT_RECHECK$/, '：等待复查');
     }
 
-    function renderEvents(data) {
-      const events = Array.isArray(data.events) ? data.events : [];
-      byId('events').innerHTML = events.length ? events.slice(0, 12).map(function (event) {
-        return '<div class="event"><time>' + escapeHtml(formatClock(event.at)) + '</time><span>' + escapeHtml(eventText(event.message)) + '</span></div>';
-      }).join('') : '<div class="empty">' + escapeHtml(t('noEvents')) + '</div>';
-      const attemptAt = number(data.lastAttemptAt) || number(data.generatedAt);
-      byId('cycle').textContent = attemptAt ? t('cycleSummary', { time: formatClock(attemptAt), ms: formatCount(number(data.lastCycleMs)) }) : t('notScanned');
-    }
-
-    function renderOutcomes(data) {
-      const summary = data.outcomeSummary || {};
-      const setReturn = function (id, value) {
-        const element = byId(id);
-        element.textContent = formatSignedPercent(value);
-        element.className = value === undefined || value === null ? 'muted' : Number(value) > 0 ? 'good' : Number(value) < 0 ? 'bad' : '';
-      };
-      byId('outcomeTracked').textContent = number(summary.tracked, number(summary.total)).toLocaleString(currentLocale);
-      setReturn('outcome30m', summary.averageReturn30m);
-      setReturn('outcome1h', summary.averageReturn1h);
-      setReturn('outcome2h', summary.averageReturn2h);
-      setReturn('outcome24h', summary.averageReturn24h);
-      byId('outcome30mCount').textContent = t('completedSamples', { n: formatCount(number(summary.completed30m)) });
-      byId('outcome1hCount').textContent = t('completedSamples', { n: formatCount(number(summary.completed1h)) });
-      byId('outcome2hCount').textContent = t('completedSamples', { n: formatCount(number(summary.completed2h)) });
-      byId('outcome24hCount').textContent = t('completedSamples', { n: formatCount(number(summary.completed24h)) });
-      const readyWindows = [
-        [t('window30m'), number(summary.completed30m)],
-        [t('window2h'), number(summary.completed2h)],
-        [t('window24h'), number(summary.completed24h)]
-      ].filter(function (item) { return item[1] >= 50; }).map(function (item) { return item[0]; });
-      byId('outcomeGate').textContent = readyWindows.length
-        ? t('gateReady', { windows: readyWindows.join(currentLocale === 'zh-CN' || currentLocale === 'zh-TW' ? '、' : ', ') })
-        : t('sampleGate');
-      const coverage = summary.coverage || {};
-      byId('outcomeCoverage').innerHTML = ['passed', 'rejected'].map(function (cohort) {
-        const rows = coverage[cohort] || {};
-        return (cohort === 'rejected' ? '<strong>' + escapeHtml(t('rejectedCohort')) + '</strong>' : '')
-          + ['m30', 'h2', 'h24'].map(function (key) {
-            const row = rows[key] || {};
-            return '<div>' + escapeHtml(t('coverageLine', { window: {m30:t('window30m'),h2:t('window2h'),h24:t('window24h')}[key],
-              eligible: formatCount(row.eligible || 0), completed: formatCount(row.completed || 0), missing: formatCount(row.missing || 0), median: formatSignedPercent(row.median) })) + '</div>';
-          }).join('');
-      }).join('');
+    function liveEmptyMessage(data, query, stale, status) {
+      if (query) return t('liveFilteredEmpty');
+      if (stale && data?.lastSuccessAt) return t('liveStale');
+      if (data?.receivedCount > 0) return t(data.diagnostics?.outsideRange === data.receivedCount ? 'liveNoScope' : 'liveExcluded');
+      return t(data?.lastSuccessAt ? 'liveEmpty' : status);
     }
 
     function renderLive() {
       const chain = viewChain || activeChain(lastData);
       const data = liveData && liveData.chain === chain ? liveData : null;
       const stale = !data || data.stale || !data.lastSuccessAt || Date.now() - data.lastSuccessAt > 60000;
-      const status = !liveEnabled ? 'livePaused' : liveOffline ? 'localOffline' : data && data.status === 'BUDGET_PAUSED' ? 'aveBudgetPaused'
+      const updateFailed = liveRefreshErrorChain === chain;
+      const status = !liveEnabled ? 'livePaused' : lastData && !serviceOnline ? 'localOffline' : updateFailed ? 'liveRefreshFailed' : data && data.status === 'BUDGET_PAUSED' ? 'aveBudgetPaused'
         : data && data.status === 'HOURLY_BUDGET_PAUSED' ? 'aveHourlyPaused' : data && data.status === 'TOTAL_BUDGET_PAUSED' ? 'aveTotalPaused'
-        : data && data.status === 'QUOTA_PAUSED' ? 'aveQuotaPaused' : data && data.status === 'RATE_LIMITED' ? 'gmgnApiRate'
-        : data && data.status === 'AUTH_REQUIRED' ? 'statusAuth' : data && data.status === 'ERROR' ? 'gmgnApiNetwork'
+        : data && data.status === 'QUOTA_PAUSED' ? 'aveQuotaPaused' : data && data.status === 'RATE_LIMITED' ? 'aveApiRate'
+        : data && ['AUTH_REQUIRED', 'AVE_AUTH_REQUIRED'].includes(data.status) ? 'statusAuth' : data && data.status === 'ERROR' ? 'aveApiNetwork'
           : !data || data.status === 'LOADING' || data.status === 'WAITING' ? 'livePolling'
             : data.diagnostics && data.diagnostics.pending > 0 && !data.diagnostics.ready ? 'livePending' : stale ? 'liveStale' : 'liveReady';
       byId('liveAuto').checked = liveEnabled;
       const market = lastData && lastData.aveMarket;
       const liveState = byId('liveState');
       const marketBlockedUntil = Math.max(number(market?.nextAllowedAt), number(market?.budget?.blockedUntil));
-      const rateLimitShownAbove = liveEnabled && !liveOffline && (data?.status === 'RATE_LIMITED'
+      const rateLimitShownAbove = liveEnabled && serviceOnline && !updateFailed && (data?.status === 'RATE_LIMITED'
         || market?.pauseCode === 'AVE_RATE_LIMITED' && marketBlockedUntil > Date.now());
       liveState.hidden = rateLimitShownAbove;
       liveState.textContent = rateLimitShownAbove ? '' : t(status);
@@ -2385,13 +2372,15 @@
         return Number.isFinite(voiceSpotlightRank(row, Date.now()))
           || !query || [row.symbol, row.name, row.address].join(' ').toLowerCase().includes(query);
       });
+      const now = Date.now();
       rows = rows.slice().sort(function (a, b) {
-        const aVoice = voiceSpotlightRank(a, Date.now()), bVoice = voiceSpotlightRank(b, Date.now());
+        const aVoice = voiceSpotlightRank(a, now), bVoice = voiceSpotlightRank(b, now);
         if (aVoice !== bVoice) return aVoice - bVoice;
-        return (mode === 'new' ? number(b.newAt || b.firstSeenAt) - number(a.newAt || a.firstSeenAt) : 0)
-          || Number(b.auditEligible) - Number(a.auditEligible)
+        return Number(b.auditEligible) - Number(a.auditEligible)
+          || (mode === 'new' ? number(b.qualifiedAt || b.newAt || b.firstSeenAt) - number(a.qualifiedAt || a.newAt || a.firstSeenAt) : 0)
           || (mode === 'priority' ? Number(b.priorityBand) - Number(a.priorityBand) : 0)
-          || number(b.volume5m) - number(a.volume5m);
+          || number(b.volume5m) - number(a.volume5m)
+          || voiceSpotlightKey(a).localeCompare(voiceSpotlightKey(b));
       });
       const reminded = rows.filter(function (row) { return Number.isFinite(voiceSpotlightRank(row, Date.now())); });
       rows = reminded.concat(rows.filter(function (row) { return !Number.isFinite(voiceSpotlightRank(row, Date.now())); })
@@ -2403,11 +2392,13 @@
           pending: data.diagnostics.pending, stale: observedRows.filter(function (row) { return row.discoveryState === 'STALE'; }).length,
           ready: observedRows.filter(function (row) { return row.auditEligible; }).length, excluded: data.diagnostics.excluded }) : '');
       const enabledChains = lastData && lastData.scheduler && lastData.scheduler.enabledChains || [];
-      const fingerprint = JSON.stringify([rows, data && data.diagnostics, chain, currentLocale, stale, liveOffline, mode, query, enabledChains, voiceSpotlight && voiceSpotlight.id, voiceSpotlightSelected, voiceSpotlightSignature, Math.floor(Date.now() / 60000)]);
+      const fingerprint = JSON.stringify([rows, data && data.diagnostics, chain, currentLocale, stale, status, mode, query, enabledChains, voiceSpotlight && voiceSpotlight.id, voiceSpotlightSelected, voiceSpotlightSignature, Math.floor(Date.now() / 60000)]);
       if (fingerprint === liveFingerprint) return;
       liveFingerprint = fingerprint;
       byId('liveRows').innerHTML = rows.map(function (row) {
-        const isNew = row.newAt && Date.now() - row.newAt < 120000;
+        const appearedAt = row.qualifiedAt || row.newAt;
+        const isNew = row.auditEligible === true && !row.stale && !row.retainedSnapshot
+          && appearedAt && now - appearedAt >= 0 && now - appearedAt < 120000;
         const spotlight = Number.isFinite(voiceSpotlightRank(row, Date.now()));
         const links = radarLinks(row);
         const unit = function (label, value, tone) { return '<div><small>' + escapeHtml(label) + '</small><b class="mono ' + (tone || '') + '">' + escapeHtml(value) + '</b></div>'; };
@@ -2418,10 +2409,10 @@
           + unit(t('liveLp'), Number.isFinite(row.liquidity) ? formatMoney(row.liquidity) : t('liveFetching'))
           + unit(t('liveVolume'), Number.isFinite(row.volume5m) ? formatMoney(row.volume5m) : t('liveFetching'))
           + unit(t(row.ageBasis === 'pool' || row.ageBasis === 'trade' ? 'poolAge' : row.ageBasis === 'launch' ? 'launchAge' : 'ageLabel'), row.createdAt ? formatDuration(Math.max(0, Date.now() - row.createdAt*1000)) : t('liveFetching')) + '</div>'
-          + '<small class="muted">' + escapeHtml(row.sourceUpdatedAt ? relativeTime(row.sourceUpdatedAt) : t('noRecord')) + '</small>' + links + '</article>';
-      }).join('') || '<div class="empty">' + escapeHtml(query ? t('liveFilteredEmpty')
-        : data && data.receivedCount > 0 ? t(data.diagnostics && data.diagnostics.outsideRange === data.receivedCount ? 'liveNoScope' : 'liveExcluded')
-          : data && data.lastSuccessAt ? t('liveEmpty') : t(status))
+          + '<small class="muted">' + escapeHtml(t('liveCardClocks', {
+            first: appearedAt ? relativeTime(appearedAt) : t('noRecord'),
+            quote: row.sourceUpdatedAt ? relativeTime(row.sourceUpdatedAt) : t('noRecord') })) + '</small>' + links + '</article>';
+      }).join('') || '<div class="empty">' + escapeHtml(liveEmptyMessage(data, query, stale, status))
         + (query ? '<p><button class="mini-button" type="button" data-live-reset>' + escapeHtml(t('liveShowAll')) + '</button></p>' : '') + '</div>';
     }
 
@@ -2435,8 +2426,11 @@
           body: JSON.stringify({chain:chain}), signal:AbortSignal.timeout(8000) });
         if (!response.ok) throw new Error('live_failed');
         const data = await response.json();
-        if (chain === (viewChain || activeChain(lastData)) && data.chain === chain) { liveData = data; liveOffline = false; }
-      } catch { liveOffline = true; }
+        if (!data || data.chain !== chain || !Array.isArray(data.rows)) throw new Error('live_invalid');
+        if (chain === (viewChain || activeChain(lastData))) { liveData = data; liveRefreshErrorChain = ''; }
+      } catch {
+        if (chain === (viewChain || activeChain(lastData))) liveRefreshErrorChain = chain;
+      }
       finally { liveBusy = false; renderLive(); }
     }
 
@@ -2476,12 +2470,11 @@
       byId('chainCandidateDetail').textContent = t('waitingRejectCounts', { waiting: formatCount(waitingCount), rejected: formatCount(hardRejectCount) });
       byId('manualDetail').textContent = t('localMarkNoTrade');
       renderNotice(data);
-      renderEvents(data);
-      renderOutcomes(data);
       renderChainSwitcher(data);
       renderAveMarket(data);
       if (!aveBusy && data.aveConnection) renderAveConnection(data.aveConnection);
       renderManagement(data);
+      renderScreening(data);
       renderTelemetry();
       renderLive();
       if (shouldRenderCandidates) renderCandidates();

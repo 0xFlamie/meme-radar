@@ -5,13 +5,13 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { archiveFiles, releaseAssetName, UPDATE_LIMITS } from '../src/updater.mjs';
+import { approvedSourceFile, assertProductionListed, privateSourcePath, releaseSourceNames } from './release-source.mjs';
 
 const defaultRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fixedTime = new Date('2000-01-01T00:00:00.000Z');
 const validVersion = value => typeof value === 'string' && /^(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})$/.test(value);
 const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
 const byteOrder = (a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b));
-const excludedSegments = new Set(['.git', '.runtime', '.local-data', 'state', 'logs', 'node_modules', 'runtime']);
 const credentialNames = new Set([
   '.env', '.npmrc', 'ave-credentials.json', 'gmgn-api-key', 'telegram-bot-token', 'agent-private-key',
   'gmgn-pending-signing-key.pem',
@@ -49,14 +49,6 @@ function readJson(file, label = file) {
   catch { fail(`${label}不是有效 JSON`); }
 }
 
-function normalizedLock(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || !value.packages?.['']) fail('package-lock.json 结构无效');
-  value = structuredClone(value);
-  delete value.version;
-  delete value.packages[''].version;
-  return sha256(Buffer.from(JSON.stringify(value)));
-}
-
 function compareVersion(a, b) {
   const left = a.split('.').map(Number), right = b.split('.').map(Number);
   for (let index = 0; index < 3; index++) if (left[index] !== right[index]) return Math.sign(left[index] - right[index]);
@@ -65,11 +57,16 @@ function compareVersion(a, b) {
 
 function localSecrets(root) {
   const result = [], add = value => {
-    if (typeof value === 'string' && value.trim() === value && value.length >= 12 && value.length <= 4096) result.push(Buffer.from(value));
+    if (typeof value !== 'string') return;
+    const secret = value.trim();
+    if (secret.length >= 8 && secret.length <= 4096) result.push(Buffer.from(secret));
   };
   try {
     const stored = JSON.parse(fs.readFileSync(path.join(root, 'state', 'ave-credentials.json'), 'utf8'));
     for (const key of ['key', 'token', 'secret']) add(stored?.[key]);
+    // Schema 1 can retain distinct data/trade keys even when runtime requires
+    // re-entry. Both remain private; inspect values only, never print them.
+    for (const key of ['data', 'trade']) add(stored?.keys?.[key]);
   } catch { /* A release source does not need local credentials. */ }
   for (const name of ['gmgn-api-key', 'telegram-bot-token', 'agent-private-key', 'gmgn-pending-signing-key.pem']) {
     try { add(fs.readFileSync(path.join(root, 'state', name), 'utf8').trim()); } catch { /* Optional local-only credential. */ }
@@ -95,25 +92,16 @@ export function collectReleaseSource(root = defaultRoot) {
     privatePathValues.add(value.replaceAll('/', '\\'));
   }
   const context = { secrets, privatePaths: [...privatePathValues].filter(value => value.length >= 4).map(value => Buffer.from(value)) };
+  const namesToRead = releaseSourceNames(root);
+  assertProductionListed(root, namesToRead);
   const files = []; let expanded = 0;
-  const visit = (directory, relative = '') => {
-    const entries = fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => byteOrder(a.name, b.name));
-    for (const entry of entries) {
-      if (entry.name === '.DS_Store' || excludedSegments.has(entry.name) || credentialNames.has(entry.name.toLowerCase())) continue;
-      const name = relative ? `${relative}/${entry.name}` : entry.name;
-      if (!safeRelative(name)) fail(`发布源包含不安全路径：${name}`);
-      const absolute = path.join(directory, entry.name), stat = fs.lstatSync(absolute);
-      if (stat.isSymbolicLink()) fail(`发布源不允许符号链接：${name}`);
-      if (stat.isDirectory()) { visit(absolute, name); continue; }
-      if (!stat.isFile() || stat.nlink !== 1) fail(`发布源包含不受支持的文件：${name}`);
-      if (stat.size > UPDATE_LIMITS.file || (expanded += stat.size) > UPDATE_LIMITS.expanded) fail('发布源大小超出更新器限制');
-      const data = fs.readFileSync(absolute); inspectSourceContent(data, name, context);
-      const executable = executableNames.has(name) || name.endsWith('.command') || name.endsWith('.sh') || Boolean(stat.mode & 0o111);
-      files.push({ name, data, mode: executable ? 0o755 : 0o644 });
-      if (files.length > UPDATE_LIMITS.entries) fail('发布源文件数超出更新器限制');
-    }
-  };
-  visit(root);
+  for (const name of namesToRead) {
+    const { file, stat } = approvedSourceFile(root, name);
+    if (stat.size > UPDATE_LIMITS.file || (expanded += stat.size) > UPDATE_LIMITS.expanded) fail('发布源大小超出更新器限制');
+    const data = fs.readFileSync(file); inspectSourceContent(data, name, context);
+    const executable = executableNames.has(name) || name.endsWith('.command') || name.endsWith('.sh') || Boolean(stat.mode & 0o111);
+    files.push({ name, data, mode: executable ? 0o755 : 0o644 });
+  }
   const names = new Set(files.map(file => file.name));
   for (const required of ['package.json', 'package-lock.json', 'src/main.mjs', 'src/updater.mjs', 'scripts/update-worker.mjs', 'public/index.html']) {
     if (!names.has(required)) fail(`发布源缺少必需文件：${required}`);
@@ -142,30 +130,13 @@ export function readWindowsDonorPolicy(root = defaultRoot) {
     || item.copiedPrefixes.some(prefix => typeof prefix !== 'string' || !prefix.endsWith('/') || !safeRelative(prefix.slice(0, -1)))
     || item.assetName !== releaseAssetName(item.version, 'win32', 'x64')
     || requiredNames.join('\n') !== ['MemeRadar-OpenSource.exe', 'runtime/node.exe'].sort(byteOrder).join('\n')
-    || item.copiedPrefixes.length !== 1 || item.copiedPrefixes[0] !== 'node_modules/') {
+    || item.copiedPrefixes.length !== 0) {
     fail('Windows donor 策略无效');
   }
   return item;
 }
 
-function donorDependencyFiles(files, sourceManifest, sourceLock) {
-  const byName = new Map(files.map(file => [file.name, file]));
-  const donorManifestFile = byName.get('package.json'), donorLockFile = byName.get('package-lock.json');
-  let donorManifest, donorLock;
-  try { donorManifest = JSON.parse(donorManifestFile?.data); donorLock = JSON.parse(donorLockFile?.data); }
-  catch { fail('Windows donor 的依赖元数据无效'); }
-  if (donorManifest.name !== sourceManifest.name || normalizedLock(donorLock) !== normalizedLock(sourceLock)) {
-    fail('Windows donor 依赖与当前 package-lock.json 不一致');
-  }
-  for (const [name, expected] of Object.entries(sourceLock.packages || {})) {
-    if (!name.startsWith('node_modules/')) continue;
-    const packaged = byName.get(`${name}/package.json`);
-    let value; try { value = JSON.parse(packaged?.data); } catch { fail(`Windows donor 缺少锁定依赖：${name}`); }
-    if (expected?.version && value.version !== expected.version) fail(`Windows donor 依赖版本不一致：${name}`);
-  }
-}
-
-export function loadWindowsDonor({ donorPath, policy, sourceManifest, sourceLock }) {
+export function loadWindowsDonor({ donorPath, policy }) {
   if (!donorPath || typeof donorPath !== 'string') fail('必须提供已验证的 Windows donor ZIP');
   donorPath = path.resolve(donorPath);
   const stat = plainFile(donorPath, 'Windows donor ZIP');
@@ -177,10 +148,10 @@ export function loadWindowsDonor({ donorPath, policy, sourceManifest, sourceLock
     if (!byName.has(name) || byName.get(name).sha256 !== hash) fail(`Windows donor 缺少或篡改必需文件：${name}`);
   }
   if (byName.get(policy.launcherSource.path)?.sha256 !== policy.launcherSource.sha256) fail('Windows donor 与已审核启动器源码不一致');
-  donorDependencyFiles(files, sourceManifest, sourceLock);
-  const selected = files.filter(file => Object.hasOwn(policy.requiredFiles, file.name)
-    || policy.copiedPrefixes.some(prefix => file.name.startsWith(prefix)));
-  if (!selected.some(file => file.name.startsWith('node_modules/'))) fail('Windows donor 不含锁定依赖');
+  // Reuse only the hash-pinned launcher and Node executable. Historical donor
+  // packages can contain obsolete dependencies; none enter the current build.
+  if (!Array.isArray(policy.copiedPrefixes) || policy.copiedPrefixes.length) fail('Windows donor 不允许复制依赖目录');
+  const selected = files.filter(file => Object.hasOwn(policy.requiredFiles, file.name));
   return selected.map(file => ({ name: file.name, data: file.data, mode: file.mode }));
 }
 
@@ -194,6 +165,10 @@ function versionedSource(sourceFiles, version) {
     fail('发布源包名、private 或版本元数据无效');
   }
   if (lock.version !== manifest.version || lock.packages[''].version !== manifest.version) fail('发布源锁文件版本不一致');
+  if (['dependencies', 'optionalDependencies', 'devDependencies'].some(field => Object.keys(manifest[field] || {}).length
+    || Object.keys(lock.packages[''][field] || {}).length) || Object.keys(lock.packages).some(name => name !== '')) {
+    fail('AVE 开源版发布源不应包含第三方 npm 依赖');
+  }
   if (compareVersion(version, manifest.version) !== 0) fail('构建版本必须与发布源 package.json 完全一致');
   manifest.version = version; lock.version = version; lock.packages[''].version = version;
   byName.get('package.json').data = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
@@ -205,7 +180,8 @@ function mergeFiles(...groups) {
   const result = new Map();
   for (const files of groups) for (const file of files) {
     if (!safeRelative(file.name) || result.has(file.name)) fail(`发布包文件冲突或路径无效：${file.name}`);
-    if (file.name.split('/').some(part => credentialNames.has(part.toLowerCase()) || ['.git', '.runtime', '.local-data', 'state', 'logs'].includes(part))) {
+    if (privateSourcePath(file.name.replace(/^runtime\//, ''))
+      || file.name.split('/').some(part => credentialNames.has(part.toLowerCase()) || ['.git', '.runtime', '.local-data', 'state', 'logs'].includes(part))) {
       fail(`发布包疑似包含本机数据：${file.name}`);
     }
     result.set(file.name, { name: file.name, data: Buffer.from(file.data), mode: file.mode === 0o755 ? 0o755 : 0o644 });
@@ -244,10 +220,12 @@ function verifyArchive(file, platform, version) {
   try { manifest = JSON.parse(byName.get('package.json')?.data); lock = JSON.parse(byName.get('package-lock.json')?.data); }
   catch { fail(`${path.basename(file)} 的版本元数据无效`); }
   if (manifest.version !== version || lock.version !== version || lock.packages?.['']?.version !== version) fail(`${path.basename(file)} 版本不一致`);
-  if (files.some(item => item.name.split('/').some(part => ['.git', '.runtime', '.local-data', 'state', 'logs'].includes(part) || credentialNames.has(part.toLowerCase())))) {
+  if (files.some(item => privateSourcePath(item.name.replace(/^runtime\//, ''))
+    || item.name.split('/').some(part => ['.git', '.runtime', '.local-data', 'state', 'logs'].includes(part) || credentialNames.has(part.toLowerCase())))) {
     fail(`${path.basename(file)} 包含私有数据路径`);
   }
-  if (platform === 'win32' && !['MemeRadar-OpenSource.exe', 'OPEN-MEME-RADAR.bat', 'runtime/node.exe', 'node_modules/gmgn-cli/package.json'].every(name => byName.has(name))) {
+  if (files.some(item => item.name.startsWith('node_modules/'))) fail(`${path.basename(file)} 不应包含第三方 npm 依赖`);
+  if (platform === 'win32' && !['MemeRadar-OpenSource.exe', 'OPEN-MEME-RADAR.bat', 'runtime/node.exe'].every(name => byName.has(name))) {
     fail(`${path.basename(file)} 缺少 Windows 便携运行文件`);
   }
   if (platform === 'darwin') {
@@ -276,7 +254,7 @@ export function buildRelease({ root = defaultRoot, outDir, version, windowsDonor
   const source = versionedSource(collectReleaseSource(root), version);
   const policy = donorPolicy || readWindowsDonorPolicy(root);
   if (!windowsDonor) windowsDonor = path.resolve(root, '..', 'releases', `v${policy.version}`, policy.assetName);
-  const donor = loadWindowsDonor({ donorPath: windowsDonor, policy, sourceManifest: source.manifest, sourceLock: source.lock });
+  const donor = loadWindowsDonor({ donorPath: windowsDonor, policy });
   const sourceByName = new Map(source.files.map(file => [file.name, file]));
   if (sha256(sourceByName.get(policy.launcherSource.path)?.data || Buffer.alloc(0)) !== policy.launcherSource.sha256) {
     fail('Windows 启动器源码已变更，不能继续使用旧的 donor EXE');
